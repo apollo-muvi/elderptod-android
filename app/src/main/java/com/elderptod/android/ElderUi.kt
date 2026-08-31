@@ -180,6 +180,75 @@ class ElderUi(private val context: Context) {
         }
     }
 
+    fun homeActionList(): LinearLayout =
+        LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+        }
+
+    fun homeActionCard(
+        title: String,
+        subtitle: String,
+        primary: Boolean,
+    ): LinearLayout =
+        LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.BOTTOM or Gravity.START
+            minimumHeight = dp(156)
+            setPadding(dp(14), dp(12), dp(14), dp(14))
+            background = if (primary) {
+                rounded(ElderColors.PRIMARY, dp(18).toFloat())
+            } else {
+                bordered(ElderColors.CARD)
+            }
+            isClickable = true
+            isFocusable = true
+            addView(
+                TextView(context).apply {
+                    text = "›"
+                    textSize = 34f
+                    typeface = Typeface.DEFAULT_BOLD
+                    gravity = Gravity.RIGHT
+                    setTextColor(if (primary) ElderColors.ON_PRIMARY else ElderColors.TEXT_PRIMARY)
+                },
+                innerWrap(),
+            )
+            addView(
+                TextView(context).apply {
+                    text = title
+                    textSize = 24f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(if (primary) ElderColors.ON_PRIMARY else ElderColors.TEXT_PRIMARY)
+                },
+                innerWrap(),
+            )
+            addView(
+                TextView(context).apply {
+                    text = subtitle
+                    textSize = 16f
+                    typeface = Typeface.DEFAULT_BOLD
+                    maxLines = 2
+                    setTextColor(if (primary) 0xD9FFFFFF.toInt() else ElderColors.TEXT_MUTED)
+                    setPadding(0, dp(4), 0, 0)
+                },
+                innerWrap(),
+            )
+        }
+
+    fun homeActionParams(first: Boolean): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(
+            0,
+            dp(156),
+            1f,
+        ).apply {
+            if (first) {
+                rightMargin = dp(6)
+            } else {
+                leftMargin = dp(6)
+            }
+        }
+
     fun panel(
         label: String,
         title: String,

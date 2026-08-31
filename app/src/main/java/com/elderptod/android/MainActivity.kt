@@ -97,6 +97,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private lateinit var subtitle: TextView
     private lateinit var status: TextView
     private lateinit var content: LinearLayout
+    private lateinit var homeActions: LinearLayout
     private lateinit var primaryButton: Button
     private lateinit var secondaryButton: Button
     private lateinit var tertiaryButton: Button
@@ -219,6 +220,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         subtitle = ui.screenLabel()
         status = ui.statusText()
         content = ui.contentColumn()
+        homeActions = ui.homeActionList()
         primaryButton = ui.actionButton(ElderActionStyle.PRIMARY)
         secondaryButton = ui.actionButton(ElderActionStyle.SECONDARY)
         tertiaryButton = ui.actionButton(ElderActionStyle.SECONDARY)
@@ -236,6 +238,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         root.addView(status, ui.matchWrap())
         root.addView(content, ui.expandedContent())
         root.addView(speakerRow, ui.matchWrap())
+        root.addView(homeActions, ui.matchWrap())
         root.addView(primaryButton, ui.matchWrap())
         root.addView(secondaryButton, ui.matchWrap())
         root.addView(tertiaryButton, ui.matchWrap())
@@ -287,6 +290,8 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     }
 
     private fun hideActions() {
+        homeActions.visibility = View.GONE
+        homeActions.removeAllViews()
         primaryButton.visibility = View.GONE
         secondaryButton.visibility = View.GONE
         tertiaryButton.visibility = View.GONE
@@ -360,13 +365,24 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             ),
             ui.matchWrap(),
         )
-        primaryButton.text = "播放提醒"
-        primaryButton.setOnClickListener { playReminder(demoReminder) }
-        tertiaryButton.text = "聲音設定"
-        tertiaryButton.setOnClickListener { showSettings() }
+        val playAction = ui.homeActionCard(
+            title = "播放提醒",
+            subtitle = "聽早上吃藥提醒",
+            primary = true,
+        ).apply {
+            setOnClickListener { playReminder(demoReminder) }
+        }
+        val settingsAction = ui.homeActionCard(
+            title = "聲音設定",
+            subtitle = "確認擴音與中文語音",
+            primary = false,
+        ).apply {
+            setOnClickListener { showSettings() }
+        }
         hideActions()
-        primaryButton.visibility = View.VISIBLE
-        tertiaryButton.visibility = View.VISIBLE
+        homeActions.addView(playAction, ui.homeActionParams(first = true))
+        homeActions.addView(settingsAction, ui.homeActionParams(first = false))
+        homeActions.visibility = View.VISIBLE
         scheduleClockRefresh()
     }
 
