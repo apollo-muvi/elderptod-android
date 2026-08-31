@@ -350,21 +350,13 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         reminderUiActive = false
         clearDynamicInputs()
         clearContent()
-        showHeader("ElderPTOD", "● 已連線")
+        showHeader("ElderPTOD", "裝置正常")
         ui.applyHomeTime(title)
         title.text = currentTimeText()
         subtitle.text = currentDateText()
         subtitle.visibility = View.VISIBLE
         showBodyStatus("")
         content.addView(ui.reminderCard(demoReminder), ui.matchWrap())
-        content.addView(
-            ui.panel(
-                label = "裝置狀態",
-                title = "聲音正常",
-                meta = "家人可以傳送提醒；目前只保證 App 開啟時收到。",
-            ),
-            ui.matchWrap(),
-        )
         val playAction = ui.homeActionCard(
             title = "播放提醒",
             subtitle = "聽早上吃藥提醒",
@@ -441,7 +433,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         reminderUiActive = false
         clearDynamicInputs()
         clearContent()
-        showHeader("ElderPTOD", "離線")
+        showHeader("ElderPTOD", "網路異常")
         showTextStack("正在重新連線", "請稍等")
         hideActions()
     }
