@@ -23,7 +23,6 @@ import android.view.inputmethod.EditorInfo
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -90,6 +89,10 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
 
     private lateinit var root: LinearLayout
     private lateinit var ui: ElderUi
+    private lateinit var topBar: LinearLayout
+    private lateinit var backButton: Button
+    private lateinit var brandText: TextView
+    private lateinit var topStatus: TextView
     private lateinit var title: TextView
     private lateinit var subtitle: TextView
     private lateinit var status: TextView
@@ -207,6 +210,11 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private fun buildShell() {
         ui = ElderUi(this)
         root = ui.screenRoot()
+        val topBarControl = ui.topBar()
+        topBar = topBarControl.row
+        backButton = topBarControl.backButton
+        brandText = topBarControl.brandText
+        topStatus = topBarControl.statusText
         title = ui.titleText()
         subtitle = ui.screenLabel()
         status = ui.statusText()
@@ -222,18 +230,19 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         speakerRow = switchControl.row
         speakerSwitch = switchControl.switch
 
+        root.addView(topBar, ui.matchWrap())
         root.addView(title, ui.matchWrap())
         root.addView(subtitle, ui.matchWrap())
         root.addView(status, ui.matchWrap())
-        root.addView(content, ui.matchWrap())
+        root.addView(content, ui.expandedContent())
+        root.addView(speakerRow, ui.matchWrap())
         root.addView(primaryButton, ui.matchWrap())
         root.addView(secondaryButton, ui.matchWrap())
         root.addView(tertiaryButton, ui.matchWrap())
         root.addView(dangerButton, ui.matchWrap())
-        root.addView(speakerRow, ui.matchWrap())
 
         setContentView(
-            ScrollView(this).apply { addView(root) },
+            root,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -241,14 +250,57 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         )
     }
 
+    private fun showHeader(
+        brand: String,
+        state: String,
+        showBack: Boolean = false,
+        onBack: () -> Unit = { showIdle() },
+    ) {
+        brandText.text = brand
+        topStatus.text = state
+        topStatus.visibility = if (state.isBlank()) View.GONE else View.VISIBLE
+        backButton.visibility = if (showBack) View.VISIBLE else View.GONE
+        backButton.setOnClickListener { onBack() }
+    }
+
+    private fun showBodyStatus(message: String) {
+        status.text = message
+        status.visibility = if (message.isBlank()) View.GONE else View.VISIBLE
+    }
+
+    private fun showTextStack(
+        titleText: String,
+        subtitleText: String = "",
+        statusText: String = "",
+    ) {
+        ui.applyScreenTitle(title)
+        title.text = titleText
+        subtitle.text = subtitleText
+        subtitle.visibility = if (subtitleText.isBlank()) View.GONE else View.VISIBLE
+        showBodyStatus(statusText)
+    }
+
+    private fun hideTextStack() {
+        title.visibility = View.GONE
+        subtitle.visibility = View.GONE
+        showBodyStatus("")
+    }
+
+    private fun hideActions() {
+        primaryButton.visibility = View.GONE
+        secondaryButton.visibility = View.GONE
+        tertiaryButton.visibility = View.GONE
+        dangerButton.visibility = View.GONE
+        speakerRow.visibility = View.GONE
+    }
+
     private fun showSetup(message: String = "") {
         homeClockActive = false
         reminderUiActive = false
         clearDynamicInputs()
         clearContent()
-        title.text = "設定這台對講機"
-        subtitle.text = "請家人協助輸入配對碼"
-        status.text = message
+        showHeader("ElderPTOD", "配對")
+        showTextStack("設定這台對講機", "請家人協助輸入配對碼", message)
         val savedBaseUrl = prefs.getString(KEY_BASE_URL, DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL
         baseUrlInput = ui.input("後端網址", savedBaseUrl)
         pairingCodeInput = ui.input("配對碼", "")
@@ -257,10 +309,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         content.addView(pairingCodeInput, ui.matchWrap())
         primaryButton.text = "設定"
         primaryButton.setOnClickListener { pairDevice() }
-        secondaryButton.visibility = View.GONE
-        tertiaryButton.visibility = View.GONE
-        dangerButton.visibility = View.GONE
-        speakerRow.visibility = View.GONE
+        hideActions()
         primaryButton.visibility = View.VISIBLE
     }
 
@@ -269,13 +318,16 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         reminderUiActive = false
         clearDynamicInputs()
         clearContent()
-        title.text = if (hasMicPermission()) "設定完成" else "請允許麥克風"
-        subtitle.text = if (hasMicPermission()) {
-            "可以開始等待家人來電"
-        } else {
-            "設定完成後就可以等待家人來電"
-        }
-        status.text = message
+        showHeader("ElderPTOD", "準備中")
+        showTextStack(
+            if (hasMicPermission()) "設定完成" else "請允許麥克風",
+            if (hasMicPermission()) {
+                "可以開始等待家人來電"
+            } else {
+                "設定完成後就可以等待家人來電"
+            },
+            message,
+        )
         primaryButton.text = if (hasMicPermission()) "開始" else "繼續"
         primaryButton.setOnClickListener {
             if (hasMicPermission()) {
@@ -284,10 +336,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
                 micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             }
         }
-        secondaryButton.visibility = View.GONE
-        tertiaryButton.visibility = View.GONE
-        dangerButton.visibility = View.GONE
-        speakerRow.visibility = View.GONE
+        hideActions()
         primaryButton.visibility = View.VISIBLE
     }
 
@@ -296,17 +345,28 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         reminderUiActive = false
         clearDynamicInputs()
         clearContent()
+        showHeader("ElderPTOD", "● 已連線")
+        ui.applyHomeTime(title)
         title.text = currentTimeText()
-        subtitle.text = "下一個提醒"
-        status.text = "已連線，等待家人來電"
+        subtitle.text = currentDateText()
+        subtitle.visibility = View.VISIBLE
+        showBodyStatus("")
         content.addView(ui.reminderCard(demoReminder), ui.matchWrap())
+        content.addView(
+            ui.panel(
+                label = "裝置狀態",
+                title = "聲音正常",
+                meta = "家人可以傳送提醒；目前只保證 App 開啟時收到。",
+            ),
+            ui.matchWrap(),
+        )
         primaryButton.text = "播放提醒"
         primaryButton.setOnClickListener { playReminder(demoReminder) }
+        tertiaryButton.text = "聲音設定"
+        tertiaryButton.setOnClickListener { showSettings() }
+        hideActions()
         primaryButton.visibility = View.VISIBLE
-        secondaryButton.visibility = View.GONE
-        tertiaryButton.visibility = View.GONE
-        dangerButton.visibility = View.GONE
-        showSpeakerSwitch()
+        tertiaryButton.visibility = View.VISIBLE
         scheduleClockRefresh()
     }
 
@@ -316,16 +376,13 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         reminderTts.stop()
         clearDynamicInputs()
         clearContent()
-        title.text = "家人正在找你"
-        subtitle.text = callerName
-        status.text = ""
+        showHeader("ElderPTOD", "家人來電")
+        showTextStack("家人正在找你", callerName)
         primaryButton.text = "接聽"
         primaryButton.setOnClickListener { acceptCall() }
         secondaryButton.text = "現在不方便"
         secondaryButton.setOnClickListener { rejectCall() }
-        tertiaryButton.visibility = View.GONE
-        dangerButton.visibility = View.GONE
-        speakerRow.visibility = View.GONE
+        hideActions()
         primaryButton.visibility = View.VISIBLE
         secondaryButton.visibility = View.VISIBLE
     }
@@ -335,12 +392,9 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         reminderUiActive = false
         clearDynamicInputs()
         clearContent()
-        title.text = "正在接通"
-        subtitle.text = "請稍等"
-        status.text = ""
-        primaryButton.visibility = View.GONE
-        secondaryButton.visibility = View.GONE
-        tertiaryButton.visibility = View.GONE
+        showHeader("ElderPTOD", "接通中")
+        showTextStack("正在接通", "請稍等")
+        hideActions()
         dangerButton.visibility = View.VISIBLE
         dangerButton.text = "結束"
         dangerButton.setOnClickListener { hangup() }
@@ -357,11 +411,9 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             callTimerActive = true
             tickCallTimer()
         }
-        title.text = "正在跟家人說話"
-        status.text = ""
-        primaryButton.visibility = View.GONE
-        secondaryButton.visibility = View.GONE
-        tertiaryButton.visibility = View.GONE
+        showHeader("ElderPTOD", "通話中")
+        showTextStack("正在跟家人說話", subtitle.text.toString())
+        hideActions()
         dangerButton.visibility = View.VISIBLE
         dangerButton.text = "結束"
         dangerButton.setOnClickListener { hangup() }
@@ -373,13 +425,9 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         reminderUiActive = false
         clearDynamicInputs()
         clearContent()
-        title.text = "正在重新連線"
-        subtitle.text = "請稍等"
-        primaryButton.visibility = View.GONE
-        secondaryButton.visibility = View.GONE
-        tertiaryButton.visibility = View.GONE
-        dangerButton.visibility = View.GONE
-        speakerRow.visibility = View.GONE
+        showHeader("ElderPTOD", "離線")
+        showTextStack("正在重新連線", "請稍等")
+        hideActions()
     }
 
     private fun playReminder(reminder: ReminderState) {
@@ -387,11 +435,23 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         reminderUiActive = true
         clearDynamicInputs()
         clearContent()
-        title.text = reminder.title
-        subtitle.text = reminder.timeText
-        status.text = "正在提醒"
+        showHeader("ElderPTOD", "● 正在播放", showBack = true)
+        hideTextStack()
+        content.addView(
+            ui.panel(
+                label = "提醒",
+                title = reminder.title,
+                meta = "",
+                style = ElderPanelStyle.SOFT,
+            ),
+            ui.matchWrap(),
+        )
         content.addView(
             ui.messageCard(reminder.message),
+            ui.matchWrap(),
+        )
+        content.addView(
+            ui.audioStatusRow("系統正在用中文語音唸出這個提醒，不會和其他語音重疊。"),
             ui.matchWrap(),
         )
         primaryButton.text = "我知道了"
@@ -399,9 +459,8 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         secondaryButton.text = "再說一次"
         secondaryButton.setOnClickListener { reminderTts.speak(reminder.message) }
         tertiaryButton.text = "打給家人"
-        tertiaryButton.setOnClickListener { status.text = "請家人從家人端打進來" }
-        dangerButton.visibility = View.GONE
-        speakerRow.visibility = View.GONE
+        tertiaryButton.setOnClickListener { showCallPrompt(reminder) }
+        hideActions()
         primaryButton.visibility = View.VISIBLE
         secondaryButton.visibility = View.VISIBLE
         tertiaryButton.visibility = View.VISIBLE
@@ -413,19 +472,74 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         reminderUiActive = true
         reminderTts.stop()
         clearContent()
-        title.text = "已經通知家人"
-        subtitle.text = reminder.title
-        status.text = "這次提醒已確認"
+        showHeader("ElderPTOD", "● 已回報", showBack = true)
+        hideTextStack()
         content.addView(
-            ui.supportMessageCard("家人會看到你已經按下確認。"),
+            ui.supportMessageCard("已經通知家人"),
+            ui.matchWrap(),
+        )
+        content.addView(
+            ui.messageCard("你已按下「我知道了」。系統會記錄這個提醒已確認。", 28f),
+            ui.matchWrap(),
+        )
+        content.addView(
+            ui.panel(
+                label = "回報狀態",
+                title = "received → played → acknowledged",
+                meta = "對應 NotificationDelivery 狀態。",
+            ),
             ui.matchWrap(),
         )
         primaryButton.text = "回首頁"
         primaryButton.setOnClickListener { showIdle() }
-        secondaryButton.visibility = View.GONE
-        tertiaryButton.visibility = View.GONE
-        dangerButton.visibility = View.GONE
-        speakerRow.visibility = View.GONE
+        hideActions()
+        primaryButton.visibility = View.VISIBLE
+    }
+
+    private fun showCallPrompt(reminder: ReminderState) {
+        homeClockActive = false
+        reminderUiActive = true
+        reminderTts.stop()
+        clearDynamicInputs()
+        clearContent()
+        showHeader("ElderPTOD", "準備撥打", showBack = true) { playReminder(reminder) }
+        hideTextStack()
+        content.addView(ui.supportMessageCard("要打給家人嗎？"), ui.matchWrap())
+        content.addView(
+            ui.messageCard("按下後會開始語音通話。提醒不會自動接聽，也不會開視訊。", 28f),
+            ui.matchWrap(),
+        )
+        content.addView(
+            ui.panel(
+                label = "通話規則",
+                title = "保留現有音訊路徑",
+                meta = "通知與提醒改用 Android 原生 TTS。",
+            ),
+            ui.matchWrap(),
+        )
+        primaryButton.text = "打給家人"
+        primaryButton.setOnClickListener { showBodyStatus("請家人從家人端打進來") }
+        secondaryButton.text = "先不要"
+        secondaryButton.setOnClickListener { playReminder(reminder) }
+        hideActions()
+        primaryButton.visibility = View.VISIBLE
+        secondaryButton.visibility = View.VISIBLE
+    }
+
+    private fun showSettings() {
+        homeClockActive = false
+        reminderUiActive = false
+        clearDynamicInputs()
+        clearContent()
+        showHeader("設定", "", showBack = true)
+        showTextStack("聲音設定")
+        content.addView(ui.settingRow("中文語音", "可用"), ui.matchWrap())
+        content.addView(ui.settingRow("連線", "正常"), ui.matchWrap())
+        content.addView(ui.footerNote("這裡只保留工程控制，不放提醒管理。"), ui.matchWrap())
+        primaryButton.text = "回首頁"
+        primaryButton.setOnClickListener { showIdle() }
+        hideActions()
+        showSpeakerSwitch()
         primaryButton.visibility = View.VISIBLE
     }
 
@@ -560,6 +674,14 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             calendar.get(java.util.Calendar.HOUR_OF_DAY),
             calendar.get(java.util.Calendar.MINUTE),
         )
+    }
+
+    private fun currentDateText(): String {
+        val calendar = java.util.Calendar.getInstance()
+        val weekdays = listOf("星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六")
+        return "今天 ${calendar.get(java.util.Calendar.MONTH) + 1}月" +
+            "${calendar.get(java.util.Calendar.DAY_OF_MONTH)}日 " +
+            weekdays[calendar.get(java.util.Calendar.DAY_OF_WEEK) - 1]
     }
 
     private fun scheduleClockRefresh() {
