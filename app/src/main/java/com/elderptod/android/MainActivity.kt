@@ -3,6 +3,7 @@ package com.elderptod.android
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Typeface
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
@@ -14,6 +15,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import android.view.Gravity
 import android.view.View
@@ -54,6 +57,7 @@ import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.audio.JavaAudioDeviceModule
 import java.io.IOException
+import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.math.max
 
@@ -69,8 +73,14 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private val backendClient by lazy { BackendClient(httpClient, mainHandler) }
     private val audioController by lazy { CallAudioController(this) }
     private val signalingClient by lazy { SignalingClient(httpClient, mainHandler, this) }
+    private val reminderTts by lazy { ReminderTtsManager(this, mainHandler) }
     private val webrtc by lazy { WebRtcCallManager(this, mainHandler, this) }
     private val httpClient = OkHttpClient.Builder().build()
+    private val demoReminder = ReminderState(
+        title = "早上吃藥",
+        message = "媽媽，現在該吃早上的藥了。",
+        timeText = "08:00",
+    )
     private val micPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) {
@@ -84,8 +94,10 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private lateinit var title: TextView
     private lateinit var subtitle: TextView
     private lateinit var status: TextView
+    private lateinit var content: LinearLayout
     private lateinit var primaryButton: Button
     private lateinit var secondaryButton: Button
+    private lateinit var tertiaryButton: Button
     private lateinit var dangerButton: Button
     private lateinit var speakerRow: LinearLayout
     private lateinit var speakerSwitch: Switch
@@ -94,6 +106,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private var activeCall: CallState? = null
     private var callStartedAt: Long = 0L
     private var callTimerActive = false
+    private var homeClockActive = false
     private var iceServers: List<PeerConnection.IceServer> =
         listOf(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer())
 
@@ -101,6 +114,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         buildShell()
+        reminderTts.initialize()
         if (deviceToken().isNullOrBlank()) {
             showSetup()
         } else {
@@ -110,6 +124,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
 
     override fun onDestroy() {
         signalingClient.close()
+        reminderTts.shutdown()
         webrtc.stop()
         audioController.stopCallAudio()
         super.onDestroy()
@@ -214,14 +229,21 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         }
         primaryButton = bigButton(0xFF1F6FEB.toInt(), 0xFFFFFFFF.toInt())
         secondaryButton = bigButton(0xFFE8EDF5.toInt(), 0xFF172033.toInt())
+        tertiaryButton = bigButton(0xFFE8EDF5.toInt(), 0xFF172033.toInt())
         dangerButton = bigButton(0xFFDF3B3B.toInt(), 0xFFFFFFFF.toInt())
+        content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+        }
         speakerRow = speakerModeRow()
 
         root.addView(title, matchWrap())
         root.addView(subtitle, matchWrap())
         root.addView(status, matchWrap())
+        root.addView(content, matchWrap())
         root.addView(primaryButton, matchWrap())
         root.addView(secondaryButton, matchWrap())
+        root.addView(tertiaryButton, matchWrap())
         root.addView(dangerButton, matchWrap())
         root.addView(speakerRow, matchWrap())
 
@@ -235,7 +257,9 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     }
 
     private fun showSetup(message: String = "") {
+        homeClockActive = false
         clearDynamicInputs()
+        clearContent()
         title.text = "設定這台對講機"
         subtitle.text = "請家人協助輸入配對碼"
         status.text = message
@@ -243,18 +267,21 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         baseUrlInput = editText("後端網址", savedBaseUrl)
         pairingCodeInput = editText("配對碼", "")
         pairingCodeInput?.imeOptions = EditorInfo.IME_ACTION_DONE
-        root.addView(baseUrlInput, 3, matchWrap())
-        root.addView(pairingCodeInput, 4, matchWrap())
+        content.addView(baseUrlInput, matchWrap())
+        content.addView(pairingCodeInput, matchWrap())
         primaryButton.text = "設定"
         primaryButton.setOnClickListener { pairDevice() }
         secondaryButton.visibility = View.GONE
+        tertiaryButton.visibility = View.GONE
         dangerButton.visibility = View.GONE
         speakerRow.visibility = View.GONE
         primaryButton.visibility = View.VISIBLE
     }
 
     private fun showReadyToStart(message: String = "") {
+        homeClockActive = false
         clearDynamicInputs()
+        clearContent()
         title.text = if (hasMicPermission()) "設定完成" else "請允許麥克風"
         subtitle.text = if (hasMicPermission()) {
             "可以開始等待家人來電"
@@ -271,25 +298,35 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             }
         }
         secondaryButton.visibility = View.GONE
+        tertiaryButton.visibility = View.GONE
         dangerButton.visibility = View.GONE
         speakerRow.visibility = View.GONE
         primaryButton.visibility = View.VISIBLE
     }
 
     private fun showIdle() {
+        homeClockActive = true
         clearDynamicInputs()
+        clearContent()
         title.text = currentTimeText()
-        subtitle.text = "可以使用"
-        status.text = "等待家人來電"
-        primaryButton.visibility = View.GONE
+        subtitle.text = "下一個提醒"
+        status.text = "已連線，等待家人來電"
+        content.addView(reminderCard(demoReminder), matchWrap())
+        primaryButton.text = "播放提醒"
+        primaryButton.setOnClickListener { playReminder(demoReminder) }
+        primaryButton.visibility = View.VISIBLE
         secondaryButton.visibility = View.GONE
+        tertiaryButton.visibility = View.GONE
         dangerButton.visibility = View.GONE
         showSpeakerSwitch()
         scheduleClockRefresh()
     }
 
     private fun showIncoming(callerName: String) {
+        homeClockActive = false
+        reminderTts.stop()
         clearDynamicInputs()
+        clearContent()
         title.text = "家人正在找你"
         subtitle.text = callerName
         status.text = ""
@@ -297,6 +334,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         primaryButton.setOnClickListener { acceptCall() }
         secondaryButton.text = "現在不方便"
         secondaryButton.setOnClickListener { rejectCall() }
+        tertiaryButton.visibility = View.GONE
         dangerButton.visibility = View.GONE
         speakerRow.visibility = View.GONE
         primaryButton.visibility = View.VISIBLE
@@ -304,12 +342,15 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     }
 
     private fun showConnecting() {
+        homeClockActive = false
         clearDynamicInputs()
+        clearContent()
         title.text = "正在接通"
         subtitle.text = "請稍等"
         status.text = ""
         primaryButton.visibility = View.GONE
         secondaryButton.visibility = View.GONE
+        tertiaryButton.visibility = View.GONE
         dangerButton.visibility = View.VISIBLE
         dangerButton.text = "結束"
         dangerButton.setOnClickListener { hangup() }
@@ -317,7 +358,9 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     }
 
     private fun showInCall() {
+        homeClockActive = false
         clearDynamicInputs()
+        clearContent()
         if (callStartedAt == 0L) {
             callStartedAt = System.currentTimeMillis()
             callTimerActive = true
@@ -327,6 +370,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         status.text = ""
         primaryButton.visibility = View.GONE
         secondaryButton.visibility = View.GONE
+        tertiaryButton.visibility = View.GONE
         dangerButton.visibility = View.VISIBLE
         dangerButton.text = "結束"
         dangerButton.setOnClickListener { hangup() }
@@ -334,13 +378,61 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     }
 
     private fun showOffline() {
+        homeClockActive = false
         clearDynamicInputs()
+        clearContent()
         title.text = "正在重新連線"
         subtitle.text = "請稍等"
         primaryButton.visibility = View.GONE
         secondaryButton.visibility = View.GONE
+        tertiaryButton.visibility = View.GONE
         dangerButton.visibility = View.GONE
         speakerRow.visibility = View.GONE
+    }
+
+    private fun playReminder(reminder: ReminderState) {
+        homeClockActive = false
+        clearDynamicInputs()
+        clearContent()
+        title.text = reminder.title
+        subtitle.text = reminder.timeText
+        status.text = "正在提醒"
+        content.addView(
+            largeTextCard(reminder.message, 30f, 0xFF172033.toInt()),
+            matchWrap(),
+        )
+        primaryButton.text = "我知道了"
+        primaryButton.setOnClickListener { acknowledgeReminder(reminder) }
+        secondaryButton.text = "再說一次"
+        secondaryButton.setOnClickListener { reminderTts.speak(reminder.message) }
+        tertiaryButton.text = "打給家人"
+        tertiaryButton.setOnClickListener { status.text = "請家人從家人端打進來" }
+        dangerButton.visibility = View.GONE
+        speakerRow.visibility = View.GONE
+        primaryButton.visibility = View.VISIBLE
+        secondaryButton.visibility = View.VISIBLE
+        tertiaryButton.visibility = View.VISIBLE
+        reminderTts.speak(reminder.message)
+    }
+
+    private fun acknowledgeReminder(reminder: ReminderState) {
+        homeClockActive = false
+        reminderTts.stop()
+        clearContent()
+        title.text = "已經通知家人"
+        subtitle.text = reminder.title
+        status.text = "這次提醒已確認"
+        content.addView(
+            largeTextCard("家人會看到你已經按下確認。", 26f, 0xFF3A4557.toInt()),
+            matchWrap(),
+        )
+        primaryButton.text = "回首頁"
+        primaryButton.setOnClickListener { showIdle() }
+        secondaryButton.visibility = View.GONE
+        tertiaryButton.visibility = View.GONE
+        dangerButton.visibility = View.GONE
+        speakerRow.visibility = View.GONE
+        primaryButton.visibility = View.VISIBLE
     }
 
     private fun pairDevice() {
@@ -426,10 +518,14 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     }
 
     private fun clearDynamicInputs() {
-        baseUrlInput?.let { root.removeView(it) }
-        pairingCodeInput?.let { root.removeView(it) }
+        baseUrlInput?.let { (it.parent as? LinearLayout)?.removeView(it) }
+        pairingCodeInput?.let { (it.parent as? LinearLayout)?.removeView(it) }
         baseUrlInput = null
         pairingCodeInput = null
+    }
+
+    private fun clearContent() {
+        content.removeAllViews()
     }
 
     private fun editText(hint: String, value: String): EditText =
@@ -451,6 +547,59 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             isAllCaps = false
         }
 
+    private fun reminderCard(reminder: ReminderState): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(22), dp(22), dp(22), dp(22))
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(0xFFFFFFFF.toInt())
+                cornerRadius = dp(8).toFloat()
+            }
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = reminder.title
+                    gravity = Gravity.CENTER
+                    textSize = 30f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(0xFF172033.toInt())
+                },
+                matchWrap(),
+            )
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = reminder.timeText
+                    gravity = Gravity.CENTER
+                    textSize = 26f
+                    setTextColor(0xFF1F6FEB.toInt())
+                    setPadding(0, dp(8), 0, dp(8))
+                },
+                matchWrap(),
+            )
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = reminder.message
+                    gravity = Gravity.CENTER
+                    textSize = 24f
+                    setTextColor(0xFF3A4557.toInt())
+                },
+                matchWrap(),
+            )
+        }
+
+    private fun largeTextCard(text: String, size: Float, color: Int): TextView =
+        TextView(this).apply {
+            this.text = text
+            gravity = Gravity.CENTER
+            textSize = size
+            setTextColor(color)
+            setPadding(dp(22), dp(24), dp(22), dp(24))
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(0xFFFFFFFF.toInt())
+                cornerRadius = dp(8).toFloat()
+            }
+        }
+
     @Suppress("DEPRECATION")
     private fun speakerModeRow(): LinearLayout =
         LinearLayout(this).apply {
@@ -465,7 +614,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
 
             addView(
                 TextView(this@MainActivity).apply {
-                    text = "強制外放"
+                    text = "工程設定：強制外放"
                     textSize = 24f
                     setTextColor(0xFF172033.toInt())
                 },
@@ -536,7 +685,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
 
     private fun scheduleClockRefresh() {
         mainHandler.postDelayed({
-            if (activeCall == null && deviceToken() != null) {
+            if (homeClockActive && activeCall == null && deviceToken() != null) {
                 title.text = currentTimeText()
                 scheduleClockRefresh()
             }
@@ -560,6 +709,12 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         }
 }
 
+data class ReminderState(
+    val title: String,
+    val message: String,
+    val timeText: String,
+)
+
 data class CallState(
     val id: String,
     val callerName: String,
@@ -580,6 +735,109 @@ interface WebRtcEvents {
     fun sendSignal(signal: JSONObject)
     fun sendMediaReady()
     fun onRemoteAudioReady()
+}
+
+private class ReminderTtsManager(
+    private val context: Context,
+    private val mainHandler: Handler,
+) : TextToSpeech.OnInitListener {
+    private var tts: TextToSpeech? = null
+    private var ready = false
+    private var pendingText: String? = null
+
+    fun initialize() {
+        if (tts != null) return
+        tts = TextToSpeech(context.applicationContext, this)
+    }
+
+    override fun onInit(status: Int) {
+        if (status != TextToSpeech.SUCCESS) {
+            Log.e(LOG_TAG, "tts init failed status=$status")
+            return
+        }
+        val engine = tts ?: return
+        val localeResult = setPreferredLocale(engine)
+        ready = localeResult != TextToSpeech.LANG_MISSING_DATA &&
+            localeResult != TextToSpeech.LANG_NOT_SUPPORTED
+        if (!ready) {
+            Log.e(LOG_TAG, "tts locale unsupported result=$localeResult")
+            return
+        }
+        engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {
+                Log.i(LOG_TAG, "tts start id=$utteranceId")
+            }
+
+            override fun onDone(utteranceId: String?) {
+                Log.i(LOG_TAG, "tts done id=$utteranceId")
+            }
+
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?) {
+                Log.e(LOG_TAG, "tts error id=$utteranceId")
+            }
+
+            override fun onError(utteranceId: String?, errorCode: Int) {
+                Log.e(LOG_TAG, "tts error id=$utteranceId code=$errorCode")
+            }
+        })
+        pendingText?.let { text ->
+            pendingText = null
+            mainHandler.post { speak(text) }
+        }
+    }
+
+    fun speak(text: String) {
+        val message = text.trim()
+        if (message.isBlank()) return
+        val engine = tts
+        if (!ready || engine == null) {
+            pendingText = message
+            Log.w(LOG_TAG, "tts queued before ready")
+            return
+        }
+        val result = engine.speak(
+            message,
+            TextToSpeech.QUEUE_FLUSH,
+            null,
+            "reminder_${System.currentTimeMillis()}",
+        )
+        if (result == TextToSpeech.ERROR) {
+            Log.e(LOG_TAG, "tts speak failed")
+        }
+    }
+
+    fun stop() {
+        pendingText = null
+        tts?.stop()
+    }
+
+    fun shutdown() {
+        pendingText = null
+        tts?.shutdown()
+        tts = null
+        ready = false
+    }
+
+    private fun setPreferredLocale(engine: TextToSpeech): Int {
+        val taiwanResult = engine.setLanguage(Locale.TAIWAN)
+        if (
+            taiwanResult != TextToSpeech.LANG_MISSING_DATA &&
+            taiwanResult != TextToSpeech.LANG_NOT_SUPPORTED
+        ) {
+            return taiwanResult
+        }
+        val chineseResult = engine.setLanguage(Locale.CHINESE)
+        if (
+            chineseResult != TextToSpeech.LANG_MISSING_DATA &&
+            chineseResult != TextToSpeech.LANG_NOT_SUPPORTED
+        ) {
+            Log.w(LOG_TAG, "tts fallback locale=zh")
+            return chineseResult
+        }
+        Log.w(LOG_TAG, "tts fallback locale=default")
+        return engine.setLanguage(Locale.getDefault())
+    }
 }
 
 private class BackendClient(
