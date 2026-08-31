@@ -3,7 +3,6 @@ package com.elderptod.android
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.Typeface
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
@@ -18,7 +17,6 @@ import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
-import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
@@ -91,6 +89,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         }
 
     private lateinit var root: LinearLayout
+    private lateinit var ui: ElderUi
     private lateinit var title: TextView
     private lateinit var subtitle: TextView
     private lateinit var status: TextView
@@ -206,49 +205,32 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     }
 
     private fun buildShell() {
-        root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(dp(28), dp(24), dp(28), dp(24))
-            setBackgroundColor(0xFFF7F8FA.toInt())
-        }
+        ui = ElderUi(this)
+        root = ui.screenRoot()
+        title = ui.titleText()
+        subtitle = ui.screenLabel()
+        status = ui.statusText()
+        content = ui.contentColumn()
+        primaryButton = ui.actionButton(ElderActionStyle.PRIMARY)
+        secondaryButton = ui.actionButton(ElderActionStyle.SECONDARY)
+        tertiaryButton = ui.actionButton(ElderActionStyle.SECONDARY)
+        dangerButton = ui.actionButton(ElderActionStyle.DANGER)
+        val switchControl = ui.engineeringSwitchRow(
+            label = "工程設定：強制外放",
+            contentDescription = "強制外放",
+        )
+        speakerRow = switchControl.row
+        speakerSwitch = switchControl.switch
 
-        title = TextView(this).apply {
-            gravity = Gravity.CENTER
-            textSize = 34f
-            setTextColor(0xFF172033.toInt())
-        }
-        subtitle = TextView(this).apply {
-            gravity = Gravity.CENTER
-            textSize = 24f
-            setTextColor(0xFF3A4557.toInt())
-            setPadding(0, dp(14), 0, dp(24))
-        }
-        status = TextView(this).apply {
-            gravity = Gravity.CENTER
-            textSize = 18f
-            setTextColor(0xFF5F6B7A.toInt())
-            setPadding(0, 0, 0, dp(20))
-        }
-        primaryButton = bigButton(0xFF1F6FEB.toInt(), 0xFFFFFFFF.toInt())
-        secondaryButton = bigButton(0xFFE8EDF5.toInt(), 0xFF172033.toInt())
-        tertiaryButton = bigButton(0xFFE8EDF5.toInt(), 0xFF172033.toInt())
-        dangerButton = bigButton(0xFFDF3B3B.toInt(), 0xFFFFFFFF.toInt())
-        content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-        }
-        speakerRow = speakerModeRow()
-
-        root.addView(title, matchWrap())
-        root.addView(subtitle, matchWrap())
-        root.addView(status, matchWrap())
-        root.addView(content, matchWrap())
-        root.addView(primaryButton, matchWrap())
-        root.addView(secondaryButton, matchWrap())
-        root.addView(tertiaryButton, matchWrap())
-        root.addView(dangerButton, matchWrap())
-        root.addView(speakerRow, matchWrap())
+        root.addView(title, ui.matchWrap())
+        root.addView(subtitle, ui.matchWrap())
+        root.addView(status, ui.matchWrap())
+        root.addView(content, ui.matchWrap())
+        root.addView(primaryButton, ui.matchWrap())
+        root.addView(secondaryButton, ui.matchWrap())
+        root.addView(tertiaryButton, ui.matchWrap())
+        root.addView(dangerButton, ui.matchWrap())
+        root.addView(speakerRow, ui.matchWrap())
 
         setContentView(
             ScrollView(this).apply { addView(root) },
@@ -268,11 +250,11 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         subtitle.text = "請家人協助輸入配對碼"
         status.text = message
         val savedBaseUrl = prefs.getString(KEY_BASE_URL, DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL
-        baseUrlInput = editText("後端網址", savedBaseUrl)
-        pairingCodeInput = editText("配對碼", "")
+        baseUrlInput = ui.input("後端網址", savedBaseUrl)
+        pairingCodeInput = ui.input("配對碼", "")
         pairingCodeInput?.imeOptions = EditorInfo.IME_ACTION_DONE
-        content.addView(baseUrlInput, matchWrap())
-        content.addView(pairingCodeInput, matchWrap())
+        content.addView(baseUrlInput, ui.matchWrap())
+        content.addView(pairingCodeInput, ui.matchWrap())
         primaryButton.text = "設定"
         primaryButton.setOnClickListener { pairDevice() }
         secondaryButton.visibility = View.GONE
@@ -317,7 +299,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         title.text = currentTimeText()
         subtitle.text = "下一個提醒"
         status.text = "已連線，等待家人來電"
-        content.addView(reminderCard(demoReminder), matchWrap())
+        content.addView(ui.reminderCard(demoReminder), ui.matchWrap())
         primaryButton.text = "播放提醒"
         primaryButton.setOnClickListener { playReminder(demoReminder) }
         primaryButton.visibility = View.VISIBLE
@@ -409,8 +391,8 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         subtitle.text = reminder.timeText
         status.text = "正在提醒"
         content.addView(
-            largeTextCard(reminder.message, 30f, 0xFF172033.toInt()),
-            matchWrap(),
+            ui.messageCard(reminder.message),
+            ui.matchWrap(),
         )
         primaryButton.text = "我知道了"
         primaryButton.setOnClickListener { acknowledgeReminder(reminder) }
@@ -435,8 +417,8 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         subtitle.text = reminder.title
         status.text = "這次提醒已確認"
         content.addView(
-            largeTextCard("家人會看到你已經按下確認。", 26f, 0xFF3A4557.toInt()),
-            matchWrap(),
+            ui.supportMessageCard("家人會看到你已經按下確認。"),
+            ui.matchWrap(),
         )
         primaryButton.text = "回首頁"
         primaryButton.setOnClickListener { showIdle() }
@@ -540,121 +522,6 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         content.removeAllViews()
     }
 
-    private fun editText(hint: String, value: String): EditText =
-        EditText(this).apply {
-            this.hint = hint
-            setText(value)
-            textSize = 22f
-            setSingleLine(true)
-            setPadding(dp(18), dp(14), dp(18), dp(14))
-        }
-
-    private fun bigButton(backgroundColor: Int, textColor: Int): Button =
-        Button(this).apply {
-            minHeight = dp(72)
-            textSize = 28f
-            setTextColor(textColor)
-            setBackgroundColor(backgroundColor)
-            visibility = View.GONE
-            isAllCaps = false
-        }
-
-    private fun reminderCard(reminder: ReminderState): LinearLayout =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(dp(22), dp(22), dp(22), dp(22))
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(0xFFFFFFFF.toInt())
-                cornerRadius = dp(8).toFloat()
-            }
-            addView(
-                TextView(this@MainActivity).apply {
-                    text = reminder.title
-                    gravity = Gravity.CENTER
-                    textSize = 30f
-                    typeface = Typeface.DEFAULT_BOLD
-                    setTextColor(0xFF172033.toInt())
-                },
-                matchWrap(),
-            )
-            addView(
-                TextView(this@MainActivity).apply {
-                    text = reminder.timeText
-                    gravity = Gravity.CENTER
-                    textSize = 26f
-                    setTextColor(0xFF1F6FEB.toInt())
-                    setPadding(0, dp(8), 0, dp(8))
-                },
-                matchWrap(),
-            )
-            addView(
-                TextView(this@MainActivity).apply {
-                    text = reminder.message
-                    gravity = Gravity.CENTER
-                    textSize = 24f
-                    setTextColor(0xFF3A4557.toInt())
-                },
-                matchWrap(),
-            )
-        }
-
-    private fun largeTextCard(text: String, size: Float, color: Int): TextView =
-        TextView(this).apply {
-            this.text = text
-            gravity = Gravity.CENTER
-            textSize = size
-            setTextColor(color)
-            setPadding(dp(22), dp(24), dp(22), dp(24))
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(0xFFFFFFFF.toInt())
-                cornerRadius = dp(8).toFloat()
-            }
-        }
-
-    @Suppress("DEPRECATION")
-    private fun speakerModeRow(): LinearLayout =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(72)
-            setPadding(dp(18), dp(10), dp(18), dp(10))
-            setBackgroundColor(0xFFE8EDF5.toInt())
-            visibility = View.GONE
-            isClickable = true
-            isFocusable = true
-
-            addView(
-                TextView(this@MainActivity).apply {
-                    text = "工程設定：強制外放"
-                    textSize = 24f
-                    setTextColor(0xFF172033.toInt())
-                },
-                LinearLayout.LayoutParams(
-                    0,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    1f,
-                ),
-            )
-            speakerSwitch = Switch(this@MainActivity).apply {
-                contentDescription = "強制外放"
-                showText = false
-                minWidth = dp(96)
-            }
-            addView(speakerSwitch, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ))
-        }
-
-    private fun matchWrap(): LinearLayout.LayoutParams =
-        LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-        ).apply {
-            setMargins(0, dp(8), 0, dp(8))
-        }
-
     private fun hasMicPermission(): Boolean =
         ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
@@ -710,8 +577,6 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         subtitle.text = "%02d:%02d".format(elapsed / 60, elapsed % 60)
         mainHandler.postDelayed({ tickCallTimer() }, 1_000)
     }
-
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private fun remoteAudioGain(settings: JSONObject?): Double =
         when (settings?.optString("remote_playback_gain_profile")) {
