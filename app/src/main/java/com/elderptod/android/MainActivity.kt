@@ -107,6 +107,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private var callStartedAt: Long = 0L
     private var callTimerActive = false
     private var homeClockActive = false
+    private var reminderUiActive = false
     private var iceServers: List<PeerConnection.IceServer> =
         listOf(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer())
 
@@ -134,7 +135,9 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         Log.i(LOG_TAG, "hello_ack deviceName=$deviceName")
         webrtc.setRemoteAudioGain(remoteAudioGain(settings))
         status.text = "可以使用"
-        showIdle()
+        if (activeCall == null && !reminderUiActive) {
+            showIdle()
+        }
     }
 
     override fun onConfigUpdated(settings: JSONObject?) {
@@ -258,6 +261,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
 
     private fun showSetup(message: String = "") {
         homeClockActive = false
+        reminderUiActive = false
         clearDynamicInputs()
         clearContent()
         title.text = "設定這台對講機"
@@ -280,6 +284,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
 
     private fun showReadyToStart(message: String = "") {
         homeClockActive = false
+        reminderUiActive = false
         clearDynamicInputs()
         clearContent()
         title.text = if (hasMicPermission()) "設定完成" else "請允許麥克風"
@@ -306,6 +311,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
 
     private fun showIdle() {
         homeClockActive = true
+        reminderUiActive = false
         clearDynamicInputs()
         clearContent()
         title.text = currentTimeText()
@@ -324,6 +330,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
 
     private fun showIncoming(callerName: String) {
         homeClockActive = false
+        reminderUiActive = false
         reminderTts.stop()
         clearDynamicInputs()
         clearContent()
@@ -343,6 +350,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
 
     private fun showConnecting() {
         homeClockActive = false
+        reminderUiActive = false
         clearDynamicInputs()
         clearContent()
         title.text = "正在接通"
@@ -359,6 +367,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
 
     private fun showInCall() {
         homeClockActive = false
+        reminderUiActive = false
         clearDynamicInputs()
         clearContent()
         if (callStartedAt == 0L) {
@@ -379,6 +388,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
 
     private fun showOffline() {
         homeClockActive = false
+        reminderUiActive = false
         clearDynamicInputs()
         clearContent()
         title.text = "正在重新連線"
@@ -392,6 +402,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
 
     private fun playReminder(reminder: ReminderState) {
         homeClockActive = false
+        reminderUiActive = true
         clearDynamicInputs()
         clearContent()
         title.text = reminder.title
@@ -417,6 +428,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
 
     private fun acknowledgeReminder(reminder: ReminderState) {
         homeClockActive = false
+        reminderUiActive = true
         reminderTts.stop()
         clearContent()
         title.text = "已經通知家人"
