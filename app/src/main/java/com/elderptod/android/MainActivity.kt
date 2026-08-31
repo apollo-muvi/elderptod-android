@@ -156,6 +156,20 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         showIncoming(callerName)
     }
 
+    override fun onNotification(reminder: ReminderState) {
+        Log.i(LOG_TAG, "notification id=${reminder.notificationId} title=${reminder.title}")
+        if (activeCall != null) {
+            signalingClient.sendNotificationEvent(
+                reminder.notificationId,
+                "failed",
+                "DEVICE_BUSY",
+            )
+            return
+        }
+        signalingClient.sendNotificationEvent(reminder.notificationId, "received")
+        playReminder(reminder)
+    }
+
     override fun onCallUpdated(call: CallState) {
         Log.i(LOG_TAG, "call_updated callId=${call.id} status=${call.status}")
         activeCall = call
@@ -478,12 +492,14 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         secondaryButton.visibility = View.VISIBLE
         tertiaryButton.visibility = View.VISIBLE
         reminderTts.speak(reminder.message)
+        signalingClient.sendNotificationEvent(reminder.notificationId, "played")
     }
 
     private fun acknowledgeReminder(reminder: ReminderState) {
         homeClockActive = false
         reminderUiActive = true
         reminderTts.stop()
+        signalingClient.sendNotificationEvent(reminder.notificationId, "acknowledged")
         clearContent()
         showHeader("ElderPTOD", "● 已回報", showBack = true)
         hideTextStack()
@@ -726,6 +742,7 @@ data class ReminderState(
     val title: String,
     val message: String,
     val timeText: String,
+    val notificationId: String? = null,
 )
 
 data class CallState(
@@ -737,6 +754,7 @@ data class CallState(
 interface SignalingListener {
     fun onHelloAck(deviceName: String, settings: JSONObject?)
     fun onConfigUpdated(settings: JSONObject?)
+    fun onNotification(reminder: ReminderState)
     fun onIncomingCall(callId: String, callerName: String)
     fun onCallUpdated(call: CallState)
     fun onSignal(callId: String, signal: JSONObject)
@@ -1007,6 +1025,18 @@ private class SignalingClient(
         socket?.send(JSONObject().put("type", "media_ready").put("call_id", callId).toString())
     }
 
+    fun sendNotificationEvent(notificationId: String?, status: String, error: String? = null) {
+        if (notificationId.isNullOrBlank()) return
+        val payload = JSONObject()
+            .put("type", "notification_event")
+            .put("notification_id", notificationId)
+            .put("status", status)
+        if (!error.isNullOrBlank()) {
+            payload.put("error", error)
+        }
+        socket?.send(payload.toString())
+    }
+
     override fun onOpen(webSocket: WebSocket, response: Response) {
         if (socket !== webSocket) return
         reconnectIndex = 0
@@ -1056,6 +1086,18 @@ private class SignalingClient(
                 message.optString("call_id"),
                 message.optString("caller_name", "家人"),
             )
+            "notification" -> {
+                val notification = message.optJSONObject("notification") ?: return
+                if (notification.optString("kind") != "reminder") return
+                listener.onNotification(
+                    ReminderState(
+                        title = notification.optString("title"),
+                        message = notification.optString("message"),
+                        timeText = "現在",
+                        notificationId = notification.optString("id"),
+                    ),
+                )
+            }
             "call_updated" -> {
                 val call = message.optJSONObject("call") ?: return
                 listener.onCallUpdated(
