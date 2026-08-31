@@ -257,11 +257,13 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         brand: String,
         state: String,
         showBack: Boolean = false,
+        statusStyle: ElderStatusStyle = ElderStatusStyle.NORMAL,
         onBack: () -> Unit = { showIdle() },
     ) {
         brandText.text = brand
         topStatus.text = state
         topStatus.visibility = if (state.isBlank()) View.GONE else View.VISIBLE
+        ui.applyStatusPill(topStatus, statusStyle)
         backButton.visibility = if (showBack) View.VISIBLE else View.GONE
         backButton.setOnClickListener { onBack() }
     }
@@ -277,6 +279,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         statusText: String = "",
     ) {
         ui.applyScreenTitle(title)
+        ui.applyScreenLabel(subtitle)
         title.text = titleText
         subtitle.text = subtitleText
         subtitle.visibility = if (subtitleText.isBlank()) View.GONE else View.VISIBLE
@@ -350,8 +353,10 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         reminderUiActive = false
         clearDynamicInputs()
         clearContent()
-        showHeader("ElderPTOD", "裝置正常")
+        showHeader("ElderPTOD", "● 裝置正常", statusStyle = ElderStatusStyle.OK)
+        content.layoutParams = ui.homeContent()
         ui.applyHomeTime(title)
+        ui.applyHomeDate(subtitle)
         title.text = currentTimeText()
         subtitle.text = currentDateText()
         subtitle.visibility = View.VISIBLE
@@ -433,7 +438,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         reminderUiActive = false
         clearDynamicInputs()
         clearContent()
-        showHeader("ElderPTOD", "網路異常")
+        showHeader("ElderPTOD", "網路異常", statusStyle = ElderStatusStyle.WARNING)
         showTextStack("正在重新連線", "請稍等")
         hideActions()
     }
@@ -642,6 +647,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
 
     private fun clearContent() {
         content.removeAllViews()
+        content.layoutParams = ui.expandedContent()
     }
 
     private fun hasMicPermission(): Boolean =

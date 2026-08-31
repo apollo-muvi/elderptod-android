@@ -52,6 +52,12 @@ enum class ElderPanelStyle {
     DANGER,
 }
 
+enum class ElderStatusStyle {
+    NORMAL,
+    OK,
+    WARNING,
+}
+
 data class ElderTopBarControl(
     val row: LinearLayout,
     val backButton: Button,
@@ -93,11 +99,10 @@ class ElderUi(private val context: Context) {
         }
         val status = TextView(context).apply {
             textSize = ElderType.PILL
-            setTextColor(ElderColors.TEXT_MUTED)
             gravity = Gravity.CENTER
             minHeight = dp(36)
             setPadding(dp(12), 0, dp(12), 0)
-            background = bordered(ElderColors.CARD, dp(999).toFloat())
+            applyStatusPill(this, ElderStatusStyle.NORMAL)
         }
         val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -384,11 +389,43 @@ class ElderUi(private val context: Context) {
             setPadding(0, dp(10), 0, 0)
         }
 
+    fun applyStatusPill(
+        view: TextView,
+        style: ElderStatusStyle,
+    ) {
+        when (style) {
+            ElderStatusStyle.NORMAL -> {
+                view.typeface = Typeface.DEFAULT
+                view.setTextColor(ElderColors.TEXT_MUTED)
+                view.background = bordered(ElderColors.CARD, dp(999).toFloat())
+            }
+            ElderStatusStyle.OK -> {
+                view.typeface = Typeface.DEFAULT_BOLD
+                view.setTextColor(ElderColors.PRIMARY)
+                view.background = rounded(ElderColors.PRIMARY_SOFT, dp(999).toFloat())
+            }
+            ElderStatusStyle.WARNING -> {
+                view.typeface = Typeface.DEFAULT_BOLD
+                view.setTextColor(ElderColors.DANGER)
+                view.background = rounded(ElderColors.DANGER_SOFT, dp(999).toFloat())
+            }
+        }
+    }
+
     fun applyHomeTime(view: TextView) {
         view.textSize = ElderType.HOME_TIME
         view.typeface = Typeface.DEFAULT_BOLD
         view.gravity = Gravity.CENTER
         view.setTextColor(ElderColors.TEXT_PRIMARY)
+        view.visibility = View.VISIBLE
+    }
+
+    fun applyHomeDate(view: TextView) {
+        view.textSize = ElderType.SCREEN_LABEL
+        view.typeface = Typeface.DEFAULT
+        view.gravity = Gravity.CENTER
+        view.setTextColor(ElderColors.TEXT_SECONDARY)
+        view.setPadding(0, dp(4), 0, dp(4))
         view.visibility = View.VISIBLE
     }
 
@@ -398,6 +435,14 @@ class ElderUi(private val context: Context) {
         view.gravity = Gravity.CENTER
         view.setTextColor(ElderColors.TEXT_PRIMARY)
         view.visibility = View.VISIBLE
+    }
+
+    fun applyScreenLabel(view: TextView) {
+        view.textSize = ElderType.SCREEN_LABEL
+        view.typeface = Typeface.DEFAULT
+        view.gravity = Gravity.CENTER
+        view.setTextColor(ElderColors.TEXT_SECONDARY)
+        view.setPadding(0, dp(8), 0, dp(16))
     }
 
     @Suppress("DEPRECATION")
@@ -454,6 +499,14 @@ class ElderUi(private val context: Context) {
             1f,
         ).apply {
             setMargins(0, dp(10), 0, dp(10))
+        }
+
+    fun homeContent(): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply {
+            setMargins(0, dp(2), 0, dp(6))
         }
 
     private fun wrapContent(): LinearLayout.LayoutParams =
