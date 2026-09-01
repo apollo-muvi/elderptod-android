@@ -78,11 +78,14 @@ import kotlin.math.max
 private const val PREFS = "elderptod"
 private const val KEY_DEVICE_TOKEN = "device_token"
 private const val KEY_BASE_URL = "base_url"
+private const val KEY_TENANT_KEY = "tenant_key"
 private const val KEY_FORCE_MEDIA_SPEAKER = "force_media_speaker"
 private const val KEY_FONT_SIZE_MODE = "font_size_mode"
 private const val DEFAULT_BASE_URL = "https://elderweb.classtutorbot.com"
 private const val PAIRING_SUCCESS_AUTO_START_DELAY_MS = 2_000L
 private const val CALL_RESULT_AUTO_HOME_DELAY_MS = 6_000L
+private const val REMINDER_REPLAY_DELAY_MS = 5_000L
+private const val REMINDER_MAX_PLAY_COUNT = 3
 private const val LOG_TAG = "ElderPTOD"
 class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -90,6 +93,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private val backendClient by lazy { BackendClient(httpClient, mainHandler) }
     private val audioController by lazy { CallAudioController(this) }
     private val signalingClient by lazy { SignalingClient(httpClient, mainHandler, this) }
+    private val reminderLocalStore by lazy { ReminderLocalStore(this) }
     private val reminderTts by lazy { ReminderTtsManager(this, mainHandler) }
     private val webrtc by lazy { WebRtcCallManager(this, mainHandler, this) }
     private val httpClient = OkHttpClient.Builder()
@@ -141,6 +145,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private lateinit var speakerSwitch: Switch
     private var baseUrlInput: EditText? = null
     private var pairingCodeInput: EditText? = null
+    private var pendingTenantKey: String? = null
     private var activeCall: CallState? = null
     private var callStartedAt: Long = 0L
     private var callTimerActive = false
@@ -148,6 +153,9 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private var reminderUiActive = false
     private var readyAutoStartRunnable: Runnable? = null
     private var callResultReturnRunnable: Runnable? = null
+    private var reminderReplayRunnable: Runnable? = null
+    private var activeReminderKey: String? = null
+    private var reminderPlayCount = 0
     private var nextReminder: ReminderState? = null
     private var callDurationText: TextView? = null
     private var remotePlaybackGainProfile = "normal"
@@ -160,6 +168,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         buildShell()
         reminderTts.initialize()
         migrateLocalBackendUrl()
+        nextReminder = reminderLocalStore.nextReminder()
         if (deviceToken().isNullOrBlank()) {
             showSetup()
         } else {
@@ -171,7 +180,9 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     override fun onDestroy() {
         cancelReadyAutoStart()
         cancelCallResultReturn()
+        cancelReminderReplay(stopAudio = true)
         signalingClient.close()
+        reminderLocalStore.close()
         reminderTts.shutdown()
         webrtc.stop()
         audioController.stopCallAudio()
@@ -205,8 +216,27 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         }
     }
 
+    override fun onRemindersSynced(
+        deviceId: String,
+        syncVersion: Long,
+        serverTime: String?,
+        reminders: List<ReminderDefinition>,
+    ) {
+        Log.i(LOG_TAG, "reminders_synced version=$syncVersion count=${reminders.size}")
+        nextReminder = reminderLocalStore.applySync(
+            deviceId = deviceId,
+            syncVersion = syncVersion,
+            serverTime = serverTime,
+            reminders = reminders,
+        )
+        if (activeCall == null && !reminderUiActive) {
+            showIdle()
+        }
+    }
+
     override fun onIncomingCall(callId: String, callerName: String) {
         Log.i(LOG_TAG, "incoming_call callId=$callId callerName=$callerName")
+        cancelReminderReplay(stopAudio = true)
         activeCall = CallState(callId, callerName, "ringing")
         audioController.startRingtone(remotePlaybackGainProfile)
         showIncoming(callerName)
@@ -216,6 +246,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         Log.i(LOG_TAG, "notification id=${reminder.notificationId} title=${reminder.title}")
         nextReminder = null
         if (activeCall != null) {
+            reminderLocalStore.markExecutionState(reminder.reminderId, "failed", "DEVICE_BUSY")
             signalingClient.sendNotificationEvent(
                 reminder.notificationId,
                 "failed",
@@ -223,6 +254,8 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             )
             return
         }
+        reminderLocalStore.markExecutionState(reminder.reminderId, "triggered")
+        reminderLocalStore.markExecutionState(reminder.reminderId, "received")
         signalingClient.sendNotificationEvent(reminder.notificationId, "received")
         playReminder(reminder)
     }
@@ -262,7 +295,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             else -> "目前無法使用"
         }
         if (code == "AUTH_FAILED") {
-            prefs.edit().remove(KEY_DEVICE_TOKEN).apply()
+            prefs.edit().remove(KEY_DEVICE_TOKEN).remove(KEY_TENANT_KEY).apply()
             showSetup(status.text.toString())
         }
     }
@@ -399,6 +432,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private fun showSetup(message: String = "") {
         homeClockActive = false
         reminderUiActive = false
+        cancelReminderReplay(stopAudio = true)
         clearDynamicInputs()
         clearContent()
         showHeader("ElderPTOD", "配對")
@@ -448,6 +482,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     ) {
         homeClockActive = false
         reminderUiActive = false
+        cancelReminderReplay(stopAudio = true)
         clearDynamicInputs()
         clearContent()
         showHeader("ElderPTOD", if (autoStart) "配對成功" else "準備中")
@@ -510,9 +545,20 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         callResultReturnRunnable = null
     }
 
+    private fun cancelReminderReplay(stopAudio: Boolean = false) {
+        reminderReplayRunnable?.let { mainHandler.removeCallbacks(it) }
+        reminderReplayRunnable = null
+        activeReminderKey = null
+        reminderPlayCount = 0
+        if (stopAudio) {
+            reminderTts.stop()
+        }
+    }
+
     private fun showIdle() {
         homeClockActive = true
         reminderUiActive = false
+        cancelReminderReplay(stopAudio = true)
         clearDynamicInputs()
         clearContent()
         showHeader("ElderPTOD", "● 裝置正常", statusStyle = ElderStatusStyle.OK)
@@ -627,6 +673,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private fun showOffline(reason: String = "") {
         homeClockActive = false
         reminderUiActive = false
+        cancelReminderReplay(stopAudio = true)
         clearDynamicInputs()
         clearContent()
         showHeader("ElderPTOD", "網路異常", statusStyle = ElderStatusStyle.WARNING)
@@ -661,24 +708,57 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         primaryButton.text = "我知道了"
         primaryButton.setOnClickListener { acknowledgeReminder(reminder) }
         secondaryButton.text = "再說一次"
-        secondaryButton.setOnClickListener { reminderTts.speak(reminder.message) }
+        secondaryButton.setOnClickListener { startReminderReplayCycle(reminder) }
         tertiaryButton.text = "打給家人"
         tertiaryButton.setOnClickListener { showCallPrompt(reminder) }
         hideActions()
         primaryButton.visibility = View.VISIBLE
         secondaryButton.visibility = View.VISIBLE
         tertiaryButton.visibility = View.VISIBLE
-        reminderTts.speak(reminder.message)
+        reminderLocalStore.markExecutionState(reminder.reminderId, "played")
+        startReminderReplayCycle(reminder)
         signalingClient.sendNotificationEvent(reminder.notificationId, "played")
     }
+
+    private fun startReminderReplayCycle(reminder: ReminderState) {
+        cancelReminderReplay(stopAudio = true)
+        val key = reminderIdentity(reminder)
+        activeReminderKey = key
+        reminderPlayCount = 0
+        playReminderAttempt(reminder, key)
+    }
+
+    private fun playReminderAttempt(reminder: ReminderState, key: String) {
+        if (activeReminderKey != key || !reminderUiActive) return
+        if (reminderPlayCount >= REMINDER_MAX_PLAY_COUNT) return
+        reminderReplayRunnable?.let { mainHandler.removeCallbacks(it) }
+        reminderReplayRunnable = null
+        reminderPlayCount += 1
+        reminderTts.speak(reminder.message) {
+            onReminderSpeechDone(reminder, key)
+        }
+    }
+
+    private fun onReminderSpeechDone(reminder: ReminderState, key: String) {
+        if (activeReminderKey != key || !reminderUiActive) return
+        if (reminderPlayCount >= REMINDER_MAX_PLAY_COUNT) return
+        reminderReplayRunnable = Runnable { playReminderAttempt(reminder, key) }
+        mainHandler.postDelayed(reminderReplayRunnable!!, REMINDER_REPLAY_DELAY_MS)
+    }
+
+    private fun reminderIdentity(reminder: ReminderState): String =
+        reminder.notificationId
+            ?: reminder.reminderId
+            ?: "${reminder.title}|${reminder.message}|${reminder.timeText}"
 
     private fun acknowledgeReminder(reminder: ReminderState) {
         homeClockActive = false
         reminderUiActive = true
-        reminderTts.stop()
-        if (nextReminder?.notificationId == reminder.notificationId) {
+        cancelReminderReplay(stopAudio = true)
+        if (nextReminder?.let { reminderIdentity(it) == reminderIdentity(reminder) } == true) {
             nextReminder = null
         }
+        reminderLocalStore.markExecutionState(reminder.reminderId, "acknowledged")
         signalingClient.sendNotificationEvent(reminder.notificationId, "acknowledged")
         clearContent()
         showHeader("ElderPTOD", "● 已回報", showBack = true)
@@ -700,7 +780,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private fun showCallPrompt(reminder: ReminderState) {
         homeClockActive = false
         reminderUiActive = true
-        reminderTts.stop()
+        cancelReminderReplay(stopAudio = true)
         clearDynamicInputs()
         clearContent()
         showHeader("ElderPTOD", "準備撥打", showBack = true) { playReminder(reminder) }
@@ -735,13 +815,16 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         }
         showBodyStatus("正在設定，請稍等")
         primaryButton.isEnabled = false
-        backendClient.pairDevice(baseUrl, pairingCode, "用戶裝置") { result ->
+        val tenantKey = pendingTenantKey?.trim().orEmpty()
+        backendClient.pairDevice(baseUrl, pairingCode, tenantKey, "用戶裝置") { result ->
             primaryButton.isEnabled = true
             result.onSuccess { token ->
                 prefs.edit()
                     .putString(KEY_BASE_URL, baseUrl)
                     .putString(KEY_DEVICE_TOKEN, token)
+                    .putString(KEY_TENANT_KEY, tenantKey)
                     .apply()
+                pendingTenantKey = null
                 showReadyToStart(autoStart = true)
             }.onFailure { error ->
                 showBodyStatus(pairingErrorMessage(error))
@@ -766,6 +849,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             return
         }
         baseUrlInput?.setText(qr.baseUrl)
+        pendingTenantKey = qr.tenantKey
         if (qr.pairingCode.isNotBlank()) {
             pairingCodeInput?.setText(qr.pairingCode)
             pairDevice()
@@ -790,7 +874,11 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         }
         val baseUrl = prefs.getString(KEY_BASE_URL, DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL
         if (baseUrl.isBlank() || isAndroidLoopbackUrl(baseUrl)) {
-            prefs.edit().remove(KEY_BASE_URL).remove(KEY_DEVICE_TOKEN).apply()
+            prefs.edit()
+                .remove(KEY_BASE_URL)
+                .remove(KEY_DEVICE_TOKEN)
+                .remove(KEY_TENANT_KEY)
+                .apply()
             showSetup("請輸入 HTTPS 後端網址，不要使用 127.0.0.1")
             return
         }
@@ -1013,12 +1101,14 @@ data class ReminderState(
     val title: String,
     val message: String,
     val timeText: String,
+    val reminderId: String? = null,
     val notificationId: String? = null,
 )
 
 private data class PairingQr(
     val baseUrl: String,
     val pairingCode: String,
+    val tenantKey: String? = null,
 )
 
 data class CallState(
@@ -1031,6 +1121,12 @@ interface SignalingListener {
     fun onHelloAck(deviceName: String, settings: JSONObject?, next: JSONObject?)
     fun onConfigUpdated(settings: JSONObject?)
     fun onRemindersUpdated(next: ReminderState?)
+    fun onRemindersSynced(
+        deviceId: String,
+        syncVersion: Long,
+        serverTime: String?,
+        reminders: List<ReminderDefinition>,
+    )
     fun onNotification(reminder: ReminderState)
     fun onIncomingCall(callId: String, callerName: String)
     fun onCallUpdated(call: CallState)
@@ -1052,6 +1148,8 @@ private class ReminderTtsManager(
     private var tts: TextToSpeech? = null
     private var ready = false
     private var pendingText: String? = null
+    private var pendingOnDone: (() -> Unit)? = null
+    private val doneCallbacks = mutableMapOf<String, () -> Unit>()
 
     fun initialize() {
         if (tts != null) return
@@ -1078,54 +1176,88 @@ private class ReminderTtsManager(
 
             override fun onDone(utteranceId: String?) {
                 Log.i(LOG_TAG, "tts done id=$utteranceId")
+                takeDoneCallback(utteranceId)?.let { callback ->
+                    mainHandler.post(callback)
+                }
             }
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
                 Log.e(LOG_TAG, "tts error id=$utteranceId")
+                takeDoneCallback(utteranceId)?.let { callback ->
+                    mainHandler.post(callback)
+                }
             }
 
             override fun onError(utteranceId: String?, errorCode: Int) {
                 Log.e(LOG_TAG, "tts error id=$utteranceId code=$errorCode")
+                takeDoneCallback(utteranceId)?.let { callback ->
+                    mainHandler.post(callback)
+                }
             }
         })
         pendingText?.let { text ->
+            val callback = pendingOnDone
             pendingText = null
-            mainHandler.post { speak(text) }
+            pendingOnDone = null
+            mainHandler.post { speak(text, callback) }
         }
     }
 
-    fun speak(text: String) {
+    fun speak(text: String, onDone: (() -> Unit)? = null) {
         val message = text.trim()
         if (message.isBlank()) return
         val engine = tts
         if (!ready || engine == null) {
             pendingText = message
+            pendingOnDone = onDone
             Log.w(LOG_TAG, "tts queued before ready")
             return
+        }
+        val utteranceId = "reminder_${System.currentTimeMillis()}"
+        if (onDone != null) {
+            synchronized(doneCallbacks) {
+                doneCallbacks[utteranceId] = onDone
+            }
         }
         val result = engine.speak(
             message,
             TextToSpeech.QUEUE_FLUSH,
             null,
-            "reminder_${System.currentTimeMillis()}",
+            utteranceId,
         )
         if (result == TextToSpeech.ERROR) {
             Log.e(LOG_TAG, "tts speak failed")
+            takeDoneCallback(utteranceId)?.let { callback ->
+                mainHandler.post(callback)
+            }
         }
     }
 
     fun stop() {
         pendingText = null
+        pendingOnDone = null
+        synchronized(doneCallbacks) {
+            doneCallbacks.clear()
+        }
         tts?.stop()
     }
 
     fun shutdown() {
         pendingText = null
+        pendingOnDone = null
+        synchronized(doneCallbacks) {
+            doneCallbacks.clear()
+        }
         tts?.shutdown()
         tts = null
         ready = false
     }
+
+    private fun takeDoneCallback(utteranceId: String?): (() -> Unit)? =
+        synchronized(doneCallbacks) {
+            doneCallbacks.remove(utteranceId)
+        }
 
     private fun setPreferredLocale(engine: TextToSpeech): Int {
         val taiwanResult = engine.setLanguage(Locale.TAIWAN)
@@ -1155,14 +1287,17 @@ private class BackendClient(
     fun pairDevice(
         baseUrl: String,
         pairingCode: String,
+        tenantKey: String,
         deviceName: String,
         callback: (Result<String>) -> Unit,
     ) {
-        val body = JSONObject()
+        val payload = JSONObject()
             .put("pairing_code", pairingCode)
             .put("device_name", deviceName)
-            .toString()
-            .toRequestBody(JSON)
+        if (tenantKey.isNotBlank()) {
+            payload.put("tenant_key", tenantKey)
+        }
+        val body = payload.toString().toRequestBody(JSON)
         val request = Request.Builder()
             .url("$baseUrl/api/devices/pair")
             .post(body)
@@ -1370,6 +1505,12 @@ private class SignalingClient(
             "reminders_updated" -> listener.onRemindersUpdated(
                 parseReminderState(message.optJSONObject("next_reminder")),
             )
+            "reminders_synced" -> listener.onRemindersSynced(
+                deviceId = message.optString("device_id"),
+                syncVersion = message.optLong("sync_version"),
+                serverTime = message.optString("server_time").ifBlank { null },
+                reminders = parseReminderDefinitions(message.optJSONArray("reminders")),
+            )
             "incoming_call" -> listener.onIncomingCall(
                 message.optString("call_id"),
                 message.optString("caller_name", "家人"),
@@ -1382,6 +1523,7 @@ private class SignalingClient(
                         title = notification.optString("title"),
                         message = notification.optString("message"),
                         timeText = "現在",
+                        reminderId = notification.optString("reminder_id").ifBlank { null },
                         notificationId = notification.optString("id"),
                     ),
                 )
@@ -2064,7 +2206,11 @@ private fun parsePairingQr(contents: String): PairingQr? {
     if (!baseUrl.startsWith("https://") || isAndroidLoopbackUrl(baseUrl)) {
         return null
     }
-    return PairingQr(baseUrl, parsed.pairingCode.trim().uppercase(Locale.US))
+    return PairingQr(
+        baseUrl,
+        parsed.pairingCode.trim().uppercase(Locale.US),
+        parsed.tenantKey?.trim()?.takeIf { it.isNotBlank() },
+    )
 }
 
 private fun parsePairingQrJson(contents: String): PairingQr? =
@@ -2075,6 +2221,10 @@ private fun parsePairingQrJson(contents: String): PairingQr? =
             pairingCode = payload.optString(
                 "pairing_code",
                 payload.optString("pairingCode", ""),
+            ),
+            tenantKey = payload.optString(
+                "tenant_key",
+                payload.optString("tenantKey", payload.optString("tenant", "")),
             ),
         )
     } catch (error: Exception) {
@@ -2088,6 +2238,7 @@ private fun parsePairingQrUrl(contents: String): PairingQr? =
         PairingQr(
             baseUrl = query["base_url"] ?: query["baseUrl"] ?: contents,
             pairingCode = query["pairing_code"] ?: query["pairingCode"] ?: "",
+            tenantKey = query["tenant_key"] ?: query["tenantKey"] ?: query["tenant"],
         )
     } catch (error: Exception) {
         null
@@ -2115,11 +2266,37 @@ private fun parseReminderState(reminder: JSONObject?): ReminderState? {
         title = title,
         message = message,
         timeText = formatReminderTime(reminder.optString("scheduled_at")),
+        reminderId = reminder.optString("id").ifBlank { null },
         notificationId = reminder.optString("notification_id").ifBlank { null },
     )
 }
 
-private fun formatReminderTime(value: String): String =
+private fun parseReminderDefinitions(array: JSONArray?): List<ReminderDefinition> {
+    if (array == null) return emptyList()
+    val reminders = mutableListOf<ReminderDefinition>()
+    for (index in 0 until array.length()) {
+        val item = array.optJSONObject(index) ?: continue
+        val id = item.optString("id")
+        val title = item.optString("title")
+        val message = item.optString("message")
+        val scheduledAt = item.optString("scheduled_at")
+        if (id.isBlank() || title.isBlank() || message.isBlank() || scheduledAt.isBlank()) {
+            continue
+        }
+        reminders += ReminderDefinition(
+            id = id,
+            title = title,
+            message = message,
+            scheduledAt = scheduledAt,
+            repeatRule = item.optString("repeat_rule", "none"),
+            enabled = item.optBoolean("enabled", true),
+            updatedAt = item.optString("updated_at"),
+        )
+    }
+    return reminders
+}
+
+fun formatReminderTime(value: String): String =
     try {
         val parsed = OffsetDateTime.parse(value)
         "%d年%d月%d日 %02d:%02d".format(
