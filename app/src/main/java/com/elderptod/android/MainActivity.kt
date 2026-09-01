@@ -16,13 +16,18 @@ import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.text.InputType
 import android.util.Log
 import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
+import android.view.animation.AlphaAnimation
+import android.view.animation.Animation
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageButton
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -54,15 +59,20 @@ import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.audio.JavaAudioDeviceModule
 import java.io.IOException
+import java.net.URI
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.math.max
 
 private const val PREFS = "elderptod"
 private const val KEY_DEVICE_TOKEN = "device_token"
 private const val KEY_BASE_URL = "base_url"
 private const val KEY_FORCE_MEDIA_SPEAKER = "force_media_speaker"
-private const val DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+private const val KEY_FONT_SIZE_MODE = "font_size_mode"
+private const val DEFAULT_BASE_URL = ""
+private const val PAIRING_SUCCESS_AUTO_START_DELAY_MS = 2_000L
+private const val CALL_RESULT_AUTO_HOME_DELAY_MS = 6_000L
 private const val LOG_TAG = "ElderPTOD"
 class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -72,16 +82,15 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private val signalingClient by lazy { SignalingClient(httpClient, mainHandler, this) }
     private val reminderTts by lazy { ReminderTtsManager(this, mainHandler) }
     private val webrtc by lazy { WebRtcCallManager(this, mainHandler, this) }
-    private val httpClient = OkHttpClient.Builder().build()
-    private val demoReminder = ReminderState(
-        title = "早上吃藥",
-        message = "媽媽，現在該吃早上的藥了。",
-        timeText = "08:00",
-    )
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
+        .writeTimeout(10, TimeUnit.SECONDS)
+        .build()
     private val micPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) {
-                showReadyToStart()
+                startOnline()
             } else {
                 showReadyToStart("請允許麥克風，家人接通後才聽得到你。")
             }
@@ -90,14 +99,16 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private lateinit var root: LinearLayout
     private lateinit var ui: ElderUi
     private lateinit var topBar: LinearLayout
-    private lateinit var backButton: Button
+    private lateinit var backButton: ImageButton
     private lateinit var brandText: TextView
     private lateinit var topStatus: TextView
     private lateinit var title: TextView
     private lateinit var subtitle: TextView
     private lateinit var status: TextView
+    private lateinit var contentScroll: ScrollView
     private lateinit var content: LinearLayout
     private lateinit var homeActions: LinearLayout
+    private lateinit var fontSizeRow: LinearLayout
     private lateinit var primaryButton: Button
     private lateinit var secondaryButton: Button
     private lateinit var tertiaryButton: Button
@@ -111,6 +122,10 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private var callTimerActive = false
     private var homeClockActive = false
     private var reminderUiActive = false
+    private var readyAutoStartRunnable: Runnable? = null
+    private var callResultReturnRunnable: Runnable? = null
+    private var nextReminder: ReminderState? = null
+    private var callDurationText: TextView? = null
     private var iceServers: List<PeerConnection.IceServer> =
         listOf(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer())
 
@@ -122,11 +137,14 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         if (deviceToken().isNullOrBlank()) {
             showSetup()
         } else {
-            showReadyToStart()
+            showIdle()
+            startOnline()
         }
     }
 
     override fun onDestroy() {
+        cancelReadyAutoStart()
+        cancelCallResultReturn()
         signalingClient.close()
         reminderTts.shutdown()
         webrtc.stop()
@@ -158,6 +176,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
 
     override fun onNotification(reminder: ReminderState) {
         Log.i(LOG_TAG, "notification id=${reminder.notificationId} title=${reminder.title}")
+        nextReminder = null
         if (activeCall != null) {
             signalingClient.sendNotificationEvent(
                 reminder.notificationId,
@@ -179,7 +198,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
                 showConnecting()
             }
             "connected" -> showInCall()
-            "rejected", "missed", "failed", "ended" -> endLocalCall("可以使用")
+            "rejected", "missed", "failed", "ended" -> endLocalCall(call.status)
         }
     }
 
@@ -223,7 +242,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     }
 
     private fun buildShell() {
-        ui = ElderUi(this)
+        ui = ElderUi(this, fontSizeMode().scale)
         root = ui.screenRoot()
         val topBarControl = ui.topBar()
         topBar = topBarControl.row
@@ -234,14 +253,19 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         subtitle = ui.screenLabel()
         status = ui.statusText()
         content = ui.contentColumn()
+        contentScroll = ui.contentScroll(content)
         homeActions = ui.homeActionList()
+        fontSizeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
         primaryButton = ui.actionButton(ElderActionStyle.PRIMARY)
         secondaryButton = ui.actionButton(ElderActionStyle.SECONDARY)
         tertiaryButton = ui.actionButton(ElderActionStyle.SECONDARY)
         dangerButton = ui.actionButton(ElderActionStyle.DANGER)
         val switchControl = ui.engineeringSwitchRow(
-            label = "工程設定：強制外放",
-            contentDescription = "強制外放",
+            label = "擴音",
+            contentDescription = "擴音",
         )
         speakerRow = switchControl.row
         speakerSwitch = switchControl.switch
@@ -250,9 +274,10 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         root.addView(title, ui.matchWrap())
         root.addView(subtitle, ui.matchWrap())
         root.addView(status, ui.matchWrap())
-        root.addView(content, ui.expandedContent())
+        root.addView(contentScroll, ui.expandedContent())
         root.addView(speakerRow, ui.matchWrap())
         root.addView(homeActions, ui.matchWrap())
+        root.addView(fontSizeRow, ui.matchWrap())
         root.addView(primaryButton, ui.matchWrap())
         root.addView(secondaryButton, ui.matchWrap())
         root.addView(tertiaryButton, ui.matchWrap())
@@ -283,8 +308,23 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     }
 
     private fun showBodyStatus(message: String) {
+        status.clearAnimation()
+        status.alpha = 1f
+        status.setTextColor(0xFF404956.toInt())
         status.text = message
         status.visibility = if (message.isBlank()) View.GONE else View.VISIBLE
+    }
+
+    private fun showPairingSuccessStatus() {
+        showBodyStatus("配對成功")
+        status.setTextColor(0xFF16856F.toInt())
+        status.startAnimation(
+            AlphaAnimation(0.35f, 1f).apply {
+                duration = 320L
+                repeatMode = Animation.REVERSE
+                repeatCount = Animation.INFINITE
+            },
+        )
     }
 
     private fun showTextStack(
@@ -314,6 +354,8 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         tertiaryButton.visibility = View.GONE
         dangerButton.visibility = View.GONE
         speakerRow.visibility = View.GONE
+        fontSizeRow.visibility = View.GONE
+        fontSizeRow.removeAllViews()
     }
 
     private fun showSetup(message: String = "") {
@@ -322,12 +364,36 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         clearDynamicInputs()
         clearContent()
         showHeader("ElderPTOD", "配對")
-        showTextStack("設定這台對講機", "請家人協助輸入配對碼", message)
+        showTextStack("設定這台裝置", "請家人協助完成配對", message)
         val savedBaseUrl = prefs.getString(KEY_BASE_URL, DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL
-        baseUrlInput = ui.input("後端網址", savedBaseUrl)
+        content.addView(
+            ui.formSection(
+                title = "1. 後端網址",
+                detail = "Android 真機請用後端電腦的區網 IP，不要使用 127.0.0.1。",
+            ),
+            ui.matchWrap(),
+        )
+        baseUrlInput = ui.input("http://192.168.1.10:8000", savedBaseUrl)
+        baseUrlInput?.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        baseUrlInput?.imeOptions = EditorInfo.IME_ACTION_NEXT
+        content.addView(baseUrlInput, ui.matchWrap())
+        content.addView(
+            ui.formSection(
+                title = "2. 配對碼",
+                detail = "請家人在管理台產生配對碼，再輸入到這台 Android 裝置。",
+            ),
+            ui.matchWrap(),
+        )
         pairingCodeInput = ui.input("配對碼", "")
         pairingCodeInput?.imeOptions = EditorInfo.IME_ACTION_DONE
-        content.addView(baseUrlInput, ui.matchWrap())
+        pairingCodeInput?.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_DONE) {
+                pairDevice()
+                true
+            } else {
+                false
+            }
+        }
         content.addView(pairingCodeInput, ui.matchWrap())
         primaryButton.text = "設定"
         primaryButton.setOnClickListener { pairDevice() }
@@ -335,31 +401,72 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         primaryButton.visibility = View.VISIBLE
     }
 
-    private fun showReadyToStart(message: String = "") {
+    private fun showReadyToStart(
+        message: String = "",
+        autoStart: Boolean = false,
+    ) {
         homeClockActive = false
         reminderUiActive = false
         clearDynamicInputs()
         clearContent()
-        showHeader("ElderPTOD", "準備中")
-        showTextStack(
-            if (hasMicPermission()) "設定完成" else "請允許麥克風",
-            if (hasMicPermission()) {
-                "可以開始等待家人來電"
-            } else {
-                "設定完成後就可以等待家人來電"
-            },
-            message,
-        )
-        primaryButton.text = if (hasMicPermission()) "開始" else "繼續"
-        primaryButton.setOnClickListener {
-            if (hasMicPermission()) {
-                startOnline()
-            } else {
-                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-            }
+        showHeader("ElderPTOD", if (autoStart) "配對成功" else "準備中")
+        hideTextStack()
+        val readyTitle = when {
+            autoStart -> "配對成功"
+            hasMicPermission() -> "準備完成"
+            else -> "請允許麥克風"
         }
+        val readyDetail = when {
+            autoStart -> "2 秒後自動進入首頁"
+            hasMicPermission() -> "可以開始等待家人來電"
+            else -> "允許後才聽得到家人通話"
+        }
+        content.addView(
+            ui.stateScreen(
+                symbol = if (autoStart) "✓" else "麥",
+                title = readyTitle,
+                detail = message.ifBlank { readyDetail },
+            ),
+            ui.matchWrap(),
+        )
+        if (autoStart) {
+            showPairingSuccessStatus()
+        }
+        primaryButton.text = if (hasMicPermission()) "開始" else "繼續"
+        primaryButton.setOnClickListener { startFromReadyScreen() }
         hideActions()
         primaryButton.visibility = View.VISIBLE
+        if (autoStart) {
+            scheduleReadyAutoStart()
+        }
+    }
+
+    private fun startFromReadyScreen() {
+        cancelReadyAutoStart()
+        if (hasMicPermission()) {
+            startOnline()
+        } else {
+            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    private fun scheduleReadyAutoStart() {
+        cancelReadyAutoStart()
+        readyAutoStartRunnable = Runnable { startFromReadyScreen() }
+        mainHandler.postDelayed(
+            readyAutoStartRunnable!!,
+            PAIRING_SUCCESS_AUTO_START_DELAY_MS,
+        )
+    }
+
+    private fun cancelReadyAutoStart() {
+        readyAutoStartRunnable?.let { mainHandler.removeCallbacks(it) }
+        readyAutoStartRunnable = null
+    }
+
+    private fun cancelCallResultReturn() {
+        callResultReturnRunnable?.let { mainHandler.removeCallbacks(it) }
+        callResultReturnRunnable = null
     }
 
     private fun showIdle() {
@@ -368,32 +475,36 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         clearDynamicInputs()
         clearContent()
         showHeader("ElderPTOD", "● 裝置正常", statusStyle = ElderStatusStyle.OK)
-        content.layoutParams = ui.homeContent()
+        contentScroll.layoutParams = ui.homeContent()
         ui.applyHomeTime(title)
         ui.applyHomeDate(subtitle)
         title.text = currentTimeText()
         subtitle.text = currentDateText()
         subtitle.visibility = View.VISIBLE
         showBodyStatus("")
-        content.addView(ui.reminderCard(demoReminder), ui.matchWrap())
+        content.addView(ui.reminderCard(nextReminder), ui.matchWrap())
         val playAction = ui.homeActionCard(
             title = "播放提醒",
-            subtitle = "聽早上吃藥提醒",
+            subtitle = nextReminder?.let { "播放下一個提醒" } ?: "目前沒有提醒",
             primary = true,
         ).apply {
-            setOnClickListener { playReminder(demoReminder) }
+            setOnClickListener {
+                nextReminder?.let { playReminder(it) } ?: showBodyStatus("目前沒有提醒")
+            }
         }
-        val settingsAction = ui.homeActionCard(
-            title = "聲音設定",
-            subtitle = "確認擴音與中文語音",
+        val reconnectAction = ui.homeActionCard(
+            title = "重新連線",
+            subtitle = "重新連接家人端",
             primary = false,
         ).apply {
-            setOnClickListener { showSettings() }
+            setOnClickListener { startOnline() }
         }
         hideActions()
+        showSpeakerSwitch()
         homeActions.addView(playAction, ui.homeActionParams(first = true))
-        homeActions.addView(settingsAction, ui.homeActionParams(first = false))
+        homeActions.addView(reconnectAction, ui.homeActionParams(first = false))
         homeActions.visibility = View.VISIBLE
+        showFontSizeSelector()
         scheduleClockRefresh()
     }
 
@@ -404,14 +515,20 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         clearDynamicInputs()
         clearContent()
         showHeader("ElderPTOD", "家人來電")
-        showTextStack("家人正在找你", callerName)
-        primaryButton.text = "接聽"
-        primaryButton.setOnClickListener { acceptCall() }
-        secondaryButton.text = "現在不方便"
-        secondaryButton.setOnClickListener { rejectCall() }
+        hideTextStack()
+        content.addView(
+            ui.callScreen(
+                callerName = callerName,
+                state = "家人來電",
+                detail = "按接聽開始通話",
+            ),
+            ui.matchWrap(),
+        )
+        val callActions = ui.incomingCallActions()
+        callActions.declineButton.setOnClickListener { rejectCall() }
+        callActions.acceptButton.setOnClickListener { acceptCall() }
+        content.addView(callActions.row, ui.matchWrap())
         hideActions()
-        primaryButton.visibility = View.VISIBLE
-        secondaryButton.visibility = View.VISIBLE
     }
 
     private fun showConnecting() {
@@ -420,7 +537,16 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         clearDynamicInputs()
         clearContent()
         showHeader("ElderPTOD", "接通中")
-        showTextStack("正在接通", "請稍等")
+        hideTextStack()
+        val callerName = activeCall?.callerName ?: "家人"
+        content.addView(
+            ui.callScreen(
+                callerName = callerName,
+                state = "正在接通",
+                detail = "請稍等，不需要操作手機",
+            ),
+            ui.matchWrap(),
+        )
         hideActions()
         dangerButton.visibility = View.VISIBLE
         dangerButton.text = "結束"
@@ -439,7 +565,17 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             tickCallTimer()
         }
         showHeader("ElderPTOD", "通話中")
-        showTextStack("正在跟家人說話", subtitle.text.toString())
+        hideTextStack()
+        callDurationText = ui.callDurationText(subtitle.text.toString())
+        content.addView(
+            ui.callScreen(
+                callerName = activeCall?.callerName ?: "家人",
+                state = "通話中",
+                detail = "保持手機在身邊即可說話",
+                durationText = callDurationText,
+            ),
+            ui.matchWrap(),
+        )
         hideActions()
         dangerButton.visibility = View.VISIBLE
         dangerButton.text = "結束"
@@ -453,7 +589,16 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         clearDynamicInputs()
         clearContent()
         showHeader("ElderPTOD", "網路異常", statusStyle = ElderStatusStyle.WARNING)
-        showTextStack("正在重新連線", "請稍等")
+        hideTextStack()
+        content.addView(
+            ui.stateScreen(
+                symbol = "!",
+                title = "連線中斷",
+                detail = "正在重新連線，請保持 Wi-Fi 開啟",
+                warning = true,
+            ),
+            ui.matchWrap(),
+        )
         hideActions()
     }
 
@@ -465,20 +610,11 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         showHeader("ElderPTOD", "● 正在播放", showBack = true)
         hideTextStack()
         content.addView(
-            ui.panel(
-                label = "提醒",
-                title = reminder.title,
-                meta = "",
-                style = ElderPanelStyle.SOFT,
-            ),
+            ui.reminderScreen(reminder),
             ui.matchWrap(),
         )
         content.addView(
-            ui.messageCard(reminder.message),
-            ui.matchWrap(),
-        )
-        content.addView(
-            ui.audioStatusRow("系統正在用中文語音唸出這個提醒，不會和其他語音重疊。"),
+            ui.audioStatusRow("正在播放中文語音提醒"),
             ui.matchWrap(),
         )
         primaryButton.text = "我知道了"
@@ -499,23 +635,18 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         homeClockActive = false
         reminderUiActive = true
         reminderTts.stop()
+        if (nextReminder?.notificationId == reminder.notificationId) {
+            nextReminder = null
+        }
         signalingClient.sendNotificationEvent(reminder.notificationId, "acknowledged")
         clearContent()
         showHeader("ElderPTOD", "● 已回報", showBack = true)
         hideTextStack()
         content.addView(
-            ui.supportMessageCard("已經通知家人"),
-            ui.matchWrap(),
-        )
-        content.addView(
-            ui.messageCard("你已按下「我知道了」。系統會記錄這個提醒已確認。", 28f),
-            ui.matchWrap(),
-        )
-        content.addView(
-            ui.panel(
-                label = "回報狀態",
-                title = "received → played → acknowledged",
-                meta = "對應 NotificationDelivery 狀態。",
+            ui.stateScreen(
+                symbol = "✓",
+                title = "已經通知家人",
+                detail = "家人端會看到確認時間",
             ),
             ui.matchWrap(),
         )
@@ -533,74 +664,64 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         clearContent()
         showHeader("ElderPTOD", "準備撥打", showBack = true) { playReminder(reminder) }
         hideTextStack()
-        content.addView(ui.supportMessageCard("要打給家人嗎？"), ui.matchWrap())
         content.addView(
-            ui.messageCard("按下後會開始語音通話。提醒不會自動接聽，也不會開視訊。", 28f),
-            ui.matchWrap(),
-        )
-        content.addView(
-            ui.panel(
-                label = "通話規則",
-                title = "保留現有音訊路徑",
-                meta = "通知與提醒改用 Android 原生 TTS。",
+            ui.stateScreen(
+                symbol = "話",
+                title = "等待家人來電",
+                detail = "請家人從家人端打進來。這裡只做語音，不會開視訊。",
             ),
             ui.matchWrap(),
         )
         primaryButton.text = "打給家人"
         primaryButton.setOnClickListener { showBodyStatus("請家人從家人端打進來") }
-        secondaryButton.text = "先不要"
-        secondaryButton.setOnClickListener { playReminder(reminder) }
+        dangerButton.text = "先不要"
+        dangerButton.setOnClickListener { playReminder(reminder) }
         hideActions()
         primaryButton.visibility = View.VISIBLE
-        secondaryButton.visibility = View.VISIBLE
-    }
-
-    private fun showSettings() {
-        homeClockActive = false
-        reminderUiActive = false
-        clearDynamicInputs()
-        clearContent()
-        showHeader("設定", "", showBack = true)
-        showTextStack("聲音設定")
-        content.addView(ui.settingRow("中文語音", "可用"), ui.matchWrap())
-        content.addView(ui.settingRow("連線", "正常"), ui.matchWrap())
-        content.addView(ui.footerNote("這裡只保留工程控制，不放提醒管理。"), ui.matchWrap())
-        primaryButton.text = "回首頁"
-        primaryButton.setOnClickListener { showIdle() }
-        hideActions()
-        showSpeakerSwitch()
-        primaryButton.visibility = View.VISIBLE
+        dangerButton.visibility = View.VISIBLE
     }
 
     private fun pairDevice() {
         val baseUrl = normalizeBaseUrl(baseUrlInput?.text?.toString().orEmpty())
         val pairingCode = pairingCodeInput?.text?.toString().orEmpty().trim()
         if (baseUrl.isBlank() || pairingCode.isBlank()) {
-            status.text = "請輸入網址和配對碼"
+            showBodyStatus("請輸入網址和配對碼")
             return
         }
-        status.text = "正在設定"
+        if (isAndroidLoopbackUrl(baseUrl)) {
+            showBodyStatus("Android 真機不能用 127.0.0.1，請輸入後端電腦的區網 IP")
+            return
+        }
+        showBodyStatus("正在設定，請稍等")
+        primaryButton.isEnabled = false
         backendClient.pairDevice(baseUrl, pairingCode, "長者對講機") { result ->
+            primaryButton.isEnabled = true
             result.onSuccess { token ->
                 prefs.edit()
                     .putString(KEY_BASE_URL, baseUrl)
                     .putString(KEY_DEVICE_TOKEN, token)
                     .apply()
-                showReadyToStart()
-            }.onFailure {
-                status.text = "配對碼無效，請家人重新產生"
+                showReadyToStart(autoStart = true)
+            }.onFailure { error ->
+                showBodyStatus(pairingErrorMessage(error))
             }
         }
     }
 
     private fun startOnline() {
+        cancelReadyAutoStart()
         val token = deviceToken()
         if (token.isNullOrBlank()) {
             showSetup()
             return
         }
-        status.text = "正在連線"
         val baseUrl = prefs.getString(KEY_BASE_URL, DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL
+        if (baseUrl.isBlank() || isAndroidLoopbackUrl(baseUrl)) {
+            prefs.edit().remove(KEY_BASE_URL).remove(KEY_DEVICE_TOKEN).apply()
+            showSetup("請輸入後端電腦的區網 IP，不要使用 127.0.0.1")
+            return
+        }
+        showBodyStatus("正在連線")
         Log.i(LOG_TAG, "start_online baseUrl=$baseUrl")
         backendClient.fetchIceServers(baseUrl) { result ->
             result.onSuccess { servers ->
@@ -631,7 +752,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         Log.i(LOG_TAG, "reject_call callId=${call.id}")
         audioController.stopRingtone()
         signalingClient.sendCallEvent("reject_call", call.id)
-        endLocalCall("可以使用")
+        endLocalCall("rejected")
     }
 
     private fun hangup() {
@@ -640,18 +761,53 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             Log.i(LOG_TAG, "hangup callId=${call.id}")
             signalingClient.sendCallEvent("hangup", call.id)
         }
-        endLocalCall("可以使用")
+        endLocalCall("ended")
     }
 
-    private fun endLocalCall(nextStatus: String) {
+    private fun endLocalCall(result: String) {
+        val callerName = activeCall?.callerName ?: "家人"
         callTimerActive = false
         callStartedAt = 0L
         audioController.stopRingtone()
         audioController.stopCallAudio()
         webrtc.stop()
         activeCall = null
-        status.text = nextStatus
-        showIdle()
+        showCallResult(callerName, result)
+    }
+
+    private fun showCallResult(callerName: String, result: String) {
+        homeClockActive = false
+        reminderUiActive = false
+        clearDynamicInputs()
+        clearContent()
+        val state = when (result) {
+            "missed" -> "未接來電"
+            "failed" -> "通話失敗"
+            "rejected" -> "已拒接"
+            else -> "通話結束"
+        }
+        val detail = when (result) {
+            "missed" -> "沒有接到這通家人來電"
+            "failed" -> "網路不穩，已結束這通電話"
+            "rejected" -> "已告訴家人現在不方便"
+            else -> "已結束這通電話"
+        }
+        showHeader("ElderPTOD", state)
+        hideTextStack()
+        content.addView(
+            ui.callScreen(
+                callerName = callerName,
+                state = state,
+                detail = detail,
+            ),
+            ui.matchWrap(),
+        )
+        hideActions()
+        callResultReturnRunnable = Runnable {
+            callResultReturnRunnable = null
+            showIdle()
+        }
+        mainHandler.postDelayed(callResultReturnRunnable!!, CALL_RESULT_AUTO_HOME_DELAY_MS)
     }
 
     private fun clearDynamicInputs() {
@@ -662,8 +818,12 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     }
 
     private fun clearContent() {
+        cancelReadyAutoStart()
+        cancelCallResultReturn()
+        callDurationText = null
         content.removeAllViews()
-        content.layoutParams = ui.expandedContent()
+        contentScroll.layoutParams = ui.expandedContent()
+        contentScroll.post { contentScroll.scrollTo(0, 0) }
     }
 
     private fun hasMicPermission(): Boolean =
@@ -674,6 +834,33 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
 
     private fun forceMediaSpeaker(): Boolean =
         prefs.getBoolean(KEY_FORCE_MEDIA_SPEAKER, true)
+
+    private fun fontSizeMode(): ElderFontSizeMode =
+        ElderFontSizeMode.fromStorage(prefs.getString(KEY_FONT_SIZE_MODE, null))
+
+    private fun showFontSizeSelector() {
+        fontSizeRow.removeAllViews()
+        val control = ui.fontSizeSelector(fontSizeMode())
+        control.standardButton.setOnClickListener { setFontSizeMode(ElderFontSizeMode.STANDARD) }
+        control.largeButton.setOnClickListener { setFontSizeMode(ElderFontSizeMode.LARGE) }
+        control.extraLargeButton.setOnClickListener { setFontSizeMode(ElderFontSizeMode.EXTRA_LARGE) }
+        fontSizeRow.addView(
+            control.row,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        fontSizeRow.visibility = View.VISIBLE
+    }
+
+    private fun setFontSizeMode(mode: ElderFontSizeMode) {
+        if (mode == fontSizeMode()) return
+        prefs.edit().putString(KEY_FONT_SIZE_MODE, mode.storageValue).apply()
+        Log.i(LOG_TAG, "font_size change mode=${mode.storageValue}")
+        buildShell()
+        showIdle()
+    }
 
     private fun showSpeakerSwitch() {
         speakerSwitch.setOnCheckedChangeListener(null)
@@ -709,7 +896,8 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private fun currentDateText(): String {
         val calendar = java.util.Calendar.getInstance()
         val weekdays = listOf("星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六")
-        return "今天 ${calendar.get(java.util.Calendar.MONTH) + 1}月" +
+        return "${calendar.get(java.util.Calendar.YEAR)}年" +
+            "${calendar.get(java.util.Calendar.MONTH) + 1}月" +
             "${calendar.get(java.util.Calendar.DAY_OF_MONTH)}日 " +
             weekdays[calendar.get(java.util.Calendar.DAY_OF_WEEK) - 1]
     }
@@ -726,7 +914,9 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private fun tickCallTimer() {
         if (!callTimerActive || callStartedAt == 0L) return
         val elapsed = max(0L, (System.currentTimeMillis() - callStartedAt) / 1000L)
-        subtitle.text = "%02d:%02d".format(elapsed / 60, elapsed % 60)
+        val duration = "%02d:%02d".format(elapsed / 60, elapsed % 60)
+        subtitle.text = duration
+        callDurationText?.text = duration
         mainHandler.postDelayed({ tickCallTimer() }, 1_000)
     }
 
@@ -898,14 +1088,16 @@ private class BackendClient(
             override fun onResponse(call: Call, response: Response) {
                 response.use {
                     if (!response.isSuccessful) {
-                        mainHandler.post { callback(Result.failure(IOException("pair failed"))) }
+                        mainHandler.post {
+                            callback(Result.failure(IOException("INVALID_PAIRING_CODE")))
+                        }
                         return
                     }
                     val token = JSONObject(response.body?.string().orEmpty())
                         .optString("device_token")
                     mainHandler.post {
                         if (token.isBlank()) {
-                            callback(Result.failure(IOException("missing token")))
+                            callback(Result.failure(IOException("BAD_PAIRING_RESPONSE")))
                         } else {
                             callback(Result.success(token))
                         }
@@ -1711,6 +1903,22 @@ private open class SimpleSdpObserver : SdpObserver {
 }
 
 private val JSON = "application/json; charset=utf-8".toMediaType()
+
+private fun isAndroidLoopbackUrl(baseUrl: String): Boolean {
+    val host = try {
+        URI(baseUrl).host
+    } catch (error: Exception) {
+        null
+    } ?: return false
+    return host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
+private fun pairingErrorMessage(error: Throwable): String =
+    when (error.message) {
+        "INVALID_PAIRING_CODE" -> "配對碼無效，請家人重新產生"
+        "BAD_PAIRING_RESPONSE" -> "後端回應格式錯誤，請確認網址是否為 ElderPTOD 後端"
+        else -> "後端連不上，請確認網址、Wi-Fi、後端服務和防火牆"
+    }
 
 private fun normalizeBaseUrl(raw: String): String =
     raw.trim().trimEnd('/').let {
