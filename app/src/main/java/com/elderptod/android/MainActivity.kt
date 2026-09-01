@@ -101,7 +101,11 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private val micPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) {
-                startOnline()
+                if (activeCall?.status == "ringing") {
+                    acceptCall()
+                } else {
+                    startOnline()
+                }
             } else {
                 showReadyToStart("請允許麥克風，家人接通後才聽得到你。")
             }
@@ -146,6 +150,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private var callResultReturnRunnable: Runnable? = null
     private var nextReminder: ReminderState? = null
     private var callDurationText: TextView? = null
+    private var remotePlaybackGainProfile = "normal"
     private var iceServers: List<PeerConnection.IceServer> =
         listOf(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer())
 
@@ -175,6 +180,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
 
     override fun onHelloAck(deviceName: String, settings: JSONObject?, next: JSONObject?) {
         Log.i(LOG_TAG, "hello_ack deviceName=$deviceName")
+        remotePlaybackGainProfile = remoteAudioGainProfile(settings)
         webrtc.setRemoteAudioGain(remoteAudioGain(settings))
         nextReminder = parseReminderState(next)
         status.text = "可以使用"
@@ -186,6 +192,8 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     override fun onConfigUpdated(settings: JSONObject?) {
         val profile = settings?.optString("remote_playback_gain_profile")
         Log.i(LOG_TAG, "config_updated gain=$profile")
+        remotePlaybackGainProfile = remoteAudioGainProfile(settings)
+        audioController.updateCallVolume(remotePlaybackGainProfile)
         webrtc.setRemoteAudioGain(remoteAudioGain(settings))
     }
 
@@ -200,7 +208,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     override fun onIncomingCall(callId: String, callerName: String) {
         Log.i(LOG_TAG, "incoming_call callId=$callId callerName=$callerName")
         activeCall = CallState(callId, callerName, "ringing")
-        audioController.startRingtone()
+        audioController.startRingtone(remotePlaybackGainProfile)
         showIncoming(callerName)
     }
 
@@ -727,7 +735,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         }
         showBodyStatus("正在設定，請稍等")
         primaryButton.isEnabled = false
-        backendClient.pairDevice(baseUrl, pairingCode, "長者對講機") { result ->
+        backendClient.pairDevice(baseUrl, pairingCode, "用戶裝置") { result ->
             primaryButton.isEnabled = true
             result.onSuccess { token ->
                 prefs.edit()
@@ -744,6 +752,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private fun scanPairingQr() {
         val options = ScanOptions()
             .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+            .setCaptureActivity(ElderQrCaptureActivity::class.java)
             .setPrompt("掃描家人管理台的配對 QR code")
             .setBeepEnabled(true)
             .setOrientationLocked(true)
@@ -805,7 +814,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         val call = activeCall ?: return
         Log.i(LOG_TAG, "accept_call callId=${call.id}")
         audioController.stopRingtone()
-        audioController.startCallAudio(forceMediaSpeaker())
+        audioController.startCallAudio(forceMediaSpeaker(), remotePlaybackGainProfile)
         webrtc.start(call.id, iceServers, forceMediaSpeaker())
         signalingClient.sendCallEvent("accept_call", call.id)
         showConnecting()
@@ -985,10 +994,18 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     }
 
     private fun remoteAudioGain(settings: JSONObject?): Double =
-        when (settings?.optString("remote_playback_gain_profile")) {
+        when (remoteAudioGainProfile(settings)) {
             "normal" -> 1.0
             "loud" -> 1.25
-            else -> 1.8
+            "extra_loud" -> 1.8
+            else -> 1.0
+        }
+
+    private fun remoteAudioGainProfile(settings: JSONObject?): String =
+        when (settings?.optString("remote_playback_gain_profile")) {
+            "loud" -> "loud"
+            "extra_loud" -> "extra_loud"
+            else -> "normal"
         }
 }
 
@@ -1421,10 +1438,10 @@ private class CallAudioController(private val context: Context) {
         }
     }
 
-    fun startRingtone() {
+    fun startRingtone(gainProfile: String) {
         stopRingtone()
-        maximizeRingVolume()
-        Log.i(LOG_TAG, "ringtone start stream=ring")
+        val ringVolume = applyRingVolume(gainProfile)
+        Log.i(LOG_TAG, "ringtone start stream=ring profile=$gainProfile")
         ringActive = true
         val defaultRingtone = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
         ringtone = RingtoneManager.getRingtone(context, defaultRingtone)?.apply {
@@ -1434,12 +1451,12 @@ private class CallAudioController(private val context: Context) {
                 .build()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 isLooping = true
-                volume = 1.0f
+                volume = ringVolume
             }
             play()
         }
         if (ringtone == null || ringtone?.isPlaying != true) {
-            toneGenerator = ToneGenerator(AudioManager.STREAM_RING, 100)
+            toneGenerator = ToneGenerator(AudioManager.STREAM_RING, (ringVolume * 100).toInt())
             ringRunnable.run()
         }
     }
@@ -1461,14 +1478,14 @@ private class CallAudioController(private val context: Context) {
     }
 
     @Suppress("DEPRECATION")
-    fun startCallAudio(forceMediaSpeaker: Boolean) {
+    fun startCallAudio(forceMediaSpeaker: Boolean, gainProfile: String) {
         stopRingtone()
         if (!callAudioActive) {
             previousMode = audioManager.mode
             previousSpeakerphone = audioManager.isSpeakerphoneOn
         }
         callAudioActive = true
-        maximizeCallVolume()
+        applyCallVolume(gainProfile)
         applyCallAudioRoute(forceMediaSpeaker)
     }
 
@@ -1476,6 +1493,11 @@ private class CallAudioController(private val context: Context) {
     fun updateCallAudioRoute(forceMediaSpeaker: Boolean) {
         if (!callAudioActive) return
         applyCallAudioRoute(forceMediaSpeaker)
+    }
+
+    fun updateCallVolume(gainProfile: String) {
+        if (!callAudioActive) return
+        applyCallVolume(gainProfile)
     }
 
     @Suppress("DEPRECATION")
@@ -1564,42 +1586,43 @@ private class CallAudioController(private val context: Context) {
         }
     }
 
-    private fun ensureMinimumVolume(stream: Int) {
-        val maxVolume = audioManager.getStreamMaxVolume(stream)
-        val minVolume = (maxVolume * 0.6f).toInt().coerceAtLeast(1)
-        if (audioManager.getStreamVolume(stream) < minVolume) {
-            audioManager.setStreamVolume(stream, minVolume, 0)
-        }
-    }
-
-    private fun maximizeCallVolume() {
+    private fun applyCallVolume(gainProfile: String) {
         if (previousMusicVolume == null) {
             previousMusicVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
         }
         if (previousVoiceCallVolume == null) {
             previousVoiceCallVolume = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
         }
-        audioManager.setStreamVolume(
-            AudioManager.STREAM_MUSIC,
-            audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
-            0,
-        )
-        audioManager.setStreamVolume(
-            AudioManager.STREAM_VOICE_CALL,
-            audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL),
-            0,
-        )
+        setCallStreamVolume(AudioManager.STREAM_MUSIC, gainProfile)
+        setCallStreamVolume(AudioManager.STREAM_VOICE_CALL, gainProfile)
     }
 
-    private fun maximizeRingVolume() {
+    private fun setCallStreamVolume(stream: Int, gainProfile: String) {
+        val maxVolume = audioManager.getStreamMaxVolume(stream)
+        val ratio = profileVolumeRatio(gainProfile)
+        val volume = (maxVolume * ratio).toInt().coerceIn(1, maxVolume)
+        audioManager.setStreamVolume(stream, volume, 0)
+        Log.i(LOG_TAG, "call_audio volume stream=$stream profile=$gainProfile value=$volume/$maxVolume")
+    }
+
+    private fun applyRingVolume(gainProfile: String): Float {
         if (previousRingVolume == null) {
             previousRingVolume = audioManager.getStreamVolume(AudioManager.STREAM_RING)
         }
-        audioManager.setStreamVolume(
-            AudioManager.STREAM_RING,
-            audioManager.getStreamMaxVolume(AudioManager.STREAM_RING),
-            0,
-        )
+        val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_RING)
+        val ratio = profileVolumeRatio(gainProfile)
+        val volume = (maxVolume * ratio).toInt().coerceIn(1, maxVolume)
+        audioManager.setStreamVolume(AudioManager.STREAM_RING, volume, 0)
+        Log.i(LOG_TAG, "ringtone volume profile=$gainProfile value=$volume/$maxVolume")
+        return ratio
+    }
+
+    private fun profileVolumeRatio(gainProfile: String): Float {
+        return when (gainProfile) {
+            "extra_loud" -> 0.75f
+            "loud" -> 0.45f
+            else -> 0.22f
+        }
     }
 
     private fun selectBuiltInSpeaker() {
@@ -1627,7 +1650,7 @@ private class WebRtcCallManager(
     private val remoteAudioTracks = mutableListOf<AudioTrack>()
     private var callId: String? = null
     private var mediaReadySent = false
-    private var remoteAudioGain = 2.0
+    private var remoteAudioGain = 1.0
     private var factoryForceMediaSpeaker: Boolean? = null
     private var factoryInitialized = false
     private var statsRunnable: Runnable? = null
