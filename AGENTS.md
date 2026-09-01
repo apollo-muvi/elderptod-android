@@ -40,5 +40,5 @@
 - If there is no next reminder, show `無`.
 - Already paired devices should open directly to the home screen and start connecting; do not stop on a `設定完成` screen.
 - After a successful new pairing, show a green flashing `配對成功` state, then auto-start after 2 seconds if the user does not press start.
-- Android real devices must not use `127.0.0.1` or `localhost` as the backend URL. Use the backend computer LAN IP.
+- Android real devices must not use `127.0.0.1` or `localhost` as the backend URL. Default real-device testing to the HTTPS tunnel `https://elderweb.classtutorbot.com`; preserve explicit LAN URLs only when manually entered for local debugging.
 - When the backend URL cannot connect, show a visible error message; never fail silently.

@@ -42,6 +42,11 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okhttp3.Dns
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.dnsoverhttps.DnsOverHttps
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import org.json.JSONArray
 import org.json.JSONObject
 import org.webrtc.AudioSource
@@ -59,7 +64,12 @@ import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.audio.JavaAudioDeviceModule
 import java.io.IOException
+import java.net.InetAddress
 import java.net.URI
+import java.net.URLDecoder
+import java.net.UnknownHostException
+import java.nio.charset.StandardCharsets
+import java.time.OffsetDateTime
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -70,7 +80,7 @@ private const val KEY_DEVICE_TOKEN = "device_token"
 private const val KEY_BASE_URL = "base_url"
 private const val KEY_FORCE_MEDIA_SPEAKER = "force_media_speaker"
 private const val KEY_FONT_SIZE_MODE = "font_size_mode"
-private const val DEFAULT_BASE_URL = ""
+private const val DEFAULT_BASE_URL = "https://elderweb.classtutorbot.com"
 private const val PAIRING_SUCCESS_AUTO_START_DELAY_MS = 2_000L
 private const val CALL_RESULT_AUTO_HOME_DELAY_MS = 6_000L
 private const val LOG_TAG = "ElderPTOD"
@@ -83,6 +93,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private val reminderTts by lazy { ReminderTtsManager(this, mainHandler) }
     private val webrtc by lazy { WebRtcCallManager(this, mainHandler, this) }
     private val httpClient = OkHttpClient.Builder()
+        .dns(ElderDns)
         .connectTimeout(6, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
         .writeTimeout(10, TimeUnit.SECONDS)
@@ -93,6 +104,15 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
                 startOnline()
             } else {
                 showReadyToStart("請允許麥克風，家人接通後才聽得到你。")
+            }
+        }
+    private val qrScanLauncher =
+        registerForActivityResult(ScanContract()) { result ->
+            val contents = result.contents
+            if (contents.isNullOrBlank()) {
+                showBodyStatus("未掃描 QR code")
+            } else {
+                applyPairingQr(contents)
             }
         }
 
@@ -134,6 +154,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         buildShell()
         reminderTts.initialize()
+        migrateLocalBackendUrl()
         if (deviceToken().isNullOrBlank()) {
             showSetup()
         } else {
@@ -152,9 +173,10 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         super.onDestroy()
     }
 
-    override fun onHelloAck(deviceName: String, settings: JSONObject?) {
+    override fun onHelloAck(deviceName: String, settings: JSONObject?, next: JSONObject?) {
         Log.i(LOG_TAG, "hello_ack deviceName=$deviceName")
         webrtc.setRemoteAudioGain(remoteAudioGain(settings))
+        nextReminder = parseReminderState(next)
         status.text = "可以使用"
         if (activeCall == null && !reminderUiActive) {
             showIdle()
@@ -165,6 +187,14 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         val profile = settings?.optString("remote_playback_gain_profile")
         Log.i(LOG_TAG, "config_updated gain=$profile")
         webrtc.setRemoteAudioGain(remoteAudioGain(settings))
+    }
+
+    override fun onRemindersUpdated(next: ReminderState?) {
+        Log.i(LOG_TAG, "reminders_updated next=${next?.title ?: "none"}")
+        nextReminder = next
+        if (activeCall == null && !reminderUiActive) {
+            showIdle()
+        }
     }
 
     override fun onIncomingCall(callId: String, callerName: String) {
@@ -207,13 +237,13 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         webrtc.handleSignal(signal)
     }
 
-    override fun onDisconnected() {
-        Log.w(LOG_TAG, "signaling disconnected")
+    override fun onDisconnected(reason: String) {
+        Log.w(LOG_TAG, "signaling disconnected reason=$reason")
         webrtc.stop()
         audioController.stopCallAudio()
         activeCall = null
         status.text = "正在重新連線"
-        showOffline()
+        showOffline(reason)
     }
 
     override fun onError(code: String) {
@@ -369,11 +399,11 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         content.addView(
             ui.formSection(
                 title = "1. 後端網址",
-                detail = "Android 真機請用後端電腦的區網 IP，不要使用 127.0.0.1。",
+                detail = "Android 真機請用 HTTPS 連線，不要使用 127.0.0.1。",
             ),
             ui.matchWrap(),
         )
-        baseUrlInput = ui.input("http://192.168.1.10:8000", savedBaseUrl)
+        baseUrlInput = ui.input("https://elderweb.classtutorbot.com", savedBaseUrl)
         baseUrlInput?.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         baseUrlInput?.imeOptions = EditorInfo.IME_ACTION_NEXT
         content.addView(baseUrlInput, ui.matchWrap())
@@ -397,8 +427,11 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         content.addView(pairingCodeInput, ui.matchWrap())
         primaryButton.text = "設定"
         primaryButton.setOnClickListener { pairDevice() }
+        secondaryButton.text = "掃描 QR"
+        secondaryButton.setOnClickListener { scanPairingQr() }
         hideActions()
         primaryButton.visibility = View.VISIBLE
+        secondaryButton.visibility = View.VISIBLE
     }
 
     private fun showReadyToStart(
@@ -583,7 +616,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         showSpeakerSwitch()
     }
 
-    private fun showOffline() {
+    private fun showOffline(reason: String = "") {
         homeClockActive = false
         reminderUiActive = false
         clearDynamicInputs()
@@ -594,7 +627,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             ui.stateScreen(
                 symbol = "!",
                 title = "連線中斷",
-                detail = "正在重新連線，請保持 Wi-Fi 開啟",
+                detail = reason.ifBlank { "正在重新連線，請保持 Wi-Fi 開啟" },
                 warning = true,
             ),
             ui.matchWrap(),
@@ -689,7 +722,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             return
         }
         if (isAndroidLoopbackUrl(baseUrl)) {
-            showBodyStatus("Android 真機不能用 127.0.0.1，請輸入後端電腦的區網 IP")
+            showBodyStatus("Android 真機不能用 127.0.0.1，請輸入 HTTPS 後端網址")
             return
         }
         showBodyStatus("正在設定，請稍等")
@@ -708,6 +741,37 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         }
     }
 
+    private fun scanPairingQr() {
+        val options = ScanOptions()
+            .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+            .setPrompt("掃描家人管理台的配對 QR code")
+            .setBeepEnabled(true)
+            .setOrientationLocked(true)
+        qrScanLauncher.launch(options)
+    }
+
+    private fun applyPairingQr(contents: String) {
+        val qr = parsePairingQr(contents)
+        if (qr == null) {
+            showBodyStatus("QR code 格式不正確，請重新產生")
+            return
+        }
+        baseUrlInput?.setText(qr.baseUrl)
+        if (qr.pairingCode.isNotBlank()) {
+            pairingCodeInput?.setText(qr.pairingCode)
+            pairDevice()
+        } else {
+            showBodyStatus("已帶入 HTTPS 後端網址，請輸入配對碼")
+        }
+    }
+
+    private fun migrateLocalBackendUrl() {
+        val savedBaseUrl = prefs.getString(KEY_BASE_URL, "") ?: ""
+        if (savedBaseUrl.isNotBlank() && isPrivateNetworkUrl(savedBaseUrl)) {
+            prefs.edit().putString(KEY_BASE_URL, DEFAULT_BASE_URL).apply()
+        }
+    }
+
     private fun startOnline() {
         cancelReadyAutoStart()
         val token = deviceToken()
@@ -718,7 +782,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         val baseUrl = prefs.getString(KEY_BASE_URL, DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL
         if (baseUrl.isBlank() || isAndroidLoopbackUrl(baseUrl)) {
             prefs.edit().remove(KEY_BASE_URL).remove(KEY_DEVICE_TOKEN).apply()
-            showSetup("請輸入後端電腦的區網 IP，不要使用 127.0.0.1")
+            showSetup("請輸入 HTTPS 後端網址，不要使用 127.0.0.1")
             return
         }
         showBodyStatus("正在連線")
@@ -935,6 +999,11 @@ data class ReminderState(
     val notificationId: String? = null,
 )
 
+private data class PairingQr(
+    val baseUrl: String,
+    val pairingCode: String,
+)
+
 data class CallState(
     val id: String,
     val callerName: String,
@@ -942,13 +1011,14 @@ data class CallState(
 )
 
 interface SignalingListener {
-    fun onHelloAck(deviceName: String, settings: JSONObject?)
+    fun onHelloAck(deviceName: String, settings: JSONObject?, next: JSONObject?)
     fun onConfigUpdated(settings: JSONObject?)
+    fun onRemindersUpdated(next: ReminderState?)
     fun onNotification(reminder: ReminderState)
     fun onIncomingCall(callId: String, callerName: String)
     fun onCallUpdated(call: CallState)
     fun onSignal(callId: String, signal: JSONObject)
-    fun onDisconnected()
+    fun onDisconnected(reason: String = "")
     fun onError(code: String)
 }
 
@@ -1260,11 +1330,16 @@ private class SignalingClient(
     }
 
     override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-        mainHandler.post { handleDisconnect(webSocket) }
+        mainHandler.post { handleDisconnect(webSocket, "連線已關閉：$code $reason") }
     }
 
     override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-        mainHandler.post { handleDisconnect(webSocket) }
+        val responseText = response?.let { "HTTP ${it.code}" }.orEmpty()
+        val message = listOf(responseText, t.message.orEmpty())
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+            .ifBlank { "WebSocket 連不上" }
+        mainHandler.post { handleDisconnect(webSocket, message) }
     }
 
     private fun handleMessage(message: JSONObject) {
@@ -1272,8 +1347,12 @@ private class SignalingClient(
             "hello_ack" -> listener.onHelloAck(
                 message.optString("device_name"),
                 message.optJSONObject("settings"),
+                message.optJSONObject("next_reminder"),
             )
             "config_updated" -> listener.onConfigUpdated(message.optJSONObject("settings"))
+            "reminders_updated" -> listener.onRemindersUpdated(
+                parseReminderState(message.optJSONObject("next_reminder")),
+            )
             "incoming_call" -> listener.onIncomingCall(
                 message.optString("call_id"),
                 message.optString("caller_name", "家人"),
@@ -1309,12 +1388,12 @@ private class SignalingClient(
         }
     }
 
-    private fun handleDisconnect(webSocket: WebSocket) {
+    private fun handleDisconnect(webSocket: WebSocket, reason: String) {
         if (socket !== webSocket) return
         mainHandler.removeCallbacks(pingRunnable)
         socket = null
         if (closedByUser) return
-        listener.onDisconnected()
+        listener.onDisconnected(reason)
         val delay = reconnectDelaysMs[minOf(reconnectIndex, reconnectDelaysMs.lastIndex)]
         reconnectIndex += 1
         reconnectRunnable = Runnable { connect(baseUrl, token) }
@@ -1904,6 +1983,26 @@ private open class SimpleSdpObserver : SdpObserver {
 
 private val JSON = "application/json; charset=utf-8".toMediaType()
 
+private object ElderDns : Dns {
+    private val cloudflareDns by lazy {
+        DnsOverHttps.Builder()
+            .client(OkHttpClient())
+            .url("https://cloudflare-dns.com/dns-query".toHttpUrl())
+            .bootstrapDnsHosts(
+                InetAddress.getByName("1.1.1.1"),
+                InetAddress.getByName("1.0.0.1"),
+            )
+            .build()
+    }
+
+    override fun lookup(hostname: String): List<InetAddress> =
+        try {
+            Dns.SYSTEM.lookup(hostname)
+        } catch (error: UnknownHostException) {
+            cloudflareDns.lookup(hostname)
+        }
+}
+
 private fun isAndroidLoopbackUrl(baseUrl: String): Boolean {
     val host = try {
         URI(baseUrl).host
@@ -1912,6 +2011,104 @@ private fun isAndroidLoopbackUrl(baseUrl: String): Boolean {
     } ?: return false
     return host == "127.0.0.1" || host == "localhost" || host == "::1"
 }
+
+private fun isPrivateNetworkUrl(baseUrl: String): Boolean {
+    val uri = try {
+        URI(baseUrl)
+    } catch (error: Exception) {
+        return false
+    }
+    if (uri.scheme != "http") return false
+    val host = uri.host ?: return false
+    if (host == "127.0.0.1" || host == "localhost" || host == "::1") return true
+    if (host.startsWith("192.168.") || host.startsWith("10.")) return true
+    val secondOctet = host
+        .split('.')
+        .takeIf { it.size == 4 && it[0] == "172" }
+        ?.getOrNull(1)
+        ?.toIntOrNull()
+    return secondOctet in 16..31
+}
+
+private fun parsePairingQr(contents: String): PairingQr? {
+    val trimmed = contents.trim()
+    val parsed = if (trimmed.startsWith("{")) {
+        parsePairingQrJson(trimmed)
+    } else {
+        parsePairingQrUrl(trimmed)
+    } ?: return null
+    val baseUrl = normalizeBaseUrl(parsed.baseUrl)
+    if (!baseUrl.startsWith("https://") || isAndroidLoopbackUrl(baseUrl)) {
+        return null
+    }
+    return PairingQr(baseUrl, parsed.pairingCode.trim().uppercase(Locale.US))
+}
+
+private fun parsePairingQrJson(contents: String): PairingQr? =
+    try {
+        val payload = JSONObject(contents)
+        PairingQr(
+            baseUrl = payload.optString("base_url", payload.optString("baseUrl", "")),
+            pairingCode = payload.optString(
+                "pairing_code",
+                payload.optString("pairingCode", ""),
+            ),
+        )
+    } catch (error: Exception) {
+        null
+    }
+
+private fun parsePairingQrUrl(contents: String): PairingQr? =
+    try {
+        val uri = URI(contents)
+        val query = parseQuery(uri.rawQuery)
+        PairingQr(
+            baseUrl = query["base_url"] ?: query["baseUrl"] ?: contents,
+            pairingCode = query["pairing_code"] ?: query["pairingCode"] ?: "",
+        )
+    } catch (error: Exception) {
+        null
+    }
+
+private fun parseQuery(rawQuery: String?): Map<String, String> {
+    if (rawQuery.isNullOrBlank()) return emptyMap()
+    return rawQuery.split("&").mapNotNull { part ->
+        val keyValue = part.split("=", limit = 2)
+        val key = decodeQueryValue(keyValue.getOrNull(0) ?: "")
+        val value = decodeQueryValue(keyValue.getOrNull(1) ?: "")
+        if (key.isBlank()) null else key to value
+    }.toMap()
+}
+
+private fun decodeQueryValue(value: String): String =
+    URLDecoder.decode(value, StandardCharsets.UTF_8.name())
+
+private fun parseReminderState(reminder: JSONObject?): ReminderState? {
+    if (reminder == null) return null
+    val title = reminder.optString("title")
+    val message = reminder.optString("message")
+    if (title.isBlank() || message.isBlank()) return null
+    return ReminderState(
+        title = title,
+        message = message,
+        timeText = formatReminderTime(reminder.optString("scheduled_at")),
+        notificationId = reminder.optString("notification_id").ifBlank { null },
+    )
+}
+
+private fun formatReminderTime(value: String): String =
+    try {
+        val parsed = OffsetDateTime.parse(value)
+        "%d年%d月%d日 %02d:%02d".format(
+            parsed.year,
+            parsed.monthValue,
+            parsed.dayOfMonth,
+            parsed.hour,
+            parsed.minute,
+        )
+    } catch (error: Exception) {
+        value.ifBlank { "下一次" }
+    }
 
 private fun pairingErrorMessage(error: Throwable): String =
     when (error.message) {
@@ -1924,7 +2121,7 @@ private fun normalizeBaseUrl(raw: String): String =
     raw.trim().trimEnd('/').let {
         when {
             it.startsWith("http://") || it.startsWith("https://") -> it
-            it.isNotBlank() -> "http://$it"
+            it.isNotBlank() -> "https://$it"
             else -> ""
         }
     }

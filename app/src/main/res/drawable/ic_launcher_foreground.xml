@@ -1,0 +1,21 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <group
+        android:translateX="-7.5" android:translateY="-7.5"
+        android:pivotX="60" android:pivotY="60"
+        android:scaleX="0.60" android:scaleY="0.60">
+        <!-- handle -->
+        <path android:fillColor="#FFFFFF"
+            android:pathData="M31,46 h16 a5,5 0 0 1 5,5 v20 a5,5 0 0 1 -5,5 h-16 a5,5 0 0 1 -5,-5 v-20 a5,5 0 0 1 5,-5 z"/>
+        <!-- cone -->
+        <path android:fillColor="#FFFFFF"
+            android:pathData="M48,42 L80,30 v62 L48,80 z"/>
+        <!-- inner wave -->
+        <path android:strokeColor="#FFFFFF" android:strokeWidth="7" android:strokeLineCap="round"
+            android:fillColor="#00000000" android:pathData="M86,48 a15,15 0 0 1 0,26"/>
+        <!-- outer accent wave -->
+        <path android:strokeColor="#5eead4" android:strokeWidth="7" android:strokeLineCap="round"
+            android:fillColor="#00000000" android:pathData="M95,40 a25,25 0 0 1 0,42"/>
+    </group>
+</vector>
