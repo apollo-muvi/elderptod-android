@@ -536,7 +536,7 @@ class ElderUi(
             )
             addView(
                 TextView(context).apply {
-                    text = reminder.message
+                    text = reminder.message.ifBlank { "正在播放錄音提醒" }
                     textSize = sp(ElderType.MESSAGE)
                     gravity = Gravity.CENTER
                     maxLines = 6
