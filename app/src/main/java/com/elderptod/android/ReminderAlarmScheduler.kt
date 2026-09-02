@@ -29,9 +29,15 @@ object ReminderAlarmContract {
     const val EXTRA_REMINDER_MESSAGE = "reminder_message"
     const val EXTRA_REMINDER_TIME_TEXT = "reminder_time_text"
     const val EXTRA_REMINDER_AUDIO_TYPE = "reminder_audio_type"
+    const val EXTRA_REMINDER_AUDIO_ASSET_ID = "reminder_audio_asset_id"
     const val EXTRA_REMINDER_AUDIO_URL = "reminder_audio_url"
     const val EXTRA_REMINDER_AUDIO_CONTENT_TYPE = "reminder_audio_content_type"
     const val EXTRA_REMINDER_AUDIO_FILENAME = "reminder_audio_filename"
+    const val EXTRA_REMINDER_AUDIO_SIZE = "reminder_audio_size"
+    const val EXTRA_REMINDER_AUDIO_CHECKSUM = "reminder_audio_checksum"
+    const val EXTRA_REMINDER_AUDIO_UPDATED_AT = "reminder_audio_updated_at"
+    const val EXTRA_REMINDER_AUDIO_LOCAL_PATH = "reminder_audio_local_path"
+    const val EXTRA_REMINDER_AUDIO_CACHE_STATUS = "reminder_audio_cache_status"
 }
 
 internal object ReminderForegroundHost {
@@ -171,12 +177,26 @@ object ReminderAlarmScheduler {
             putExtra(ReminderAlarmContract.EXTRA_REMINDER_MESSAGE, reminder.message)
             putExtra(ReminderAlarmContract.EXTRA_REMINDER_TIME_TEXT, reminder.timeText)
             putExtra(ReminderAlarmContract.EXTRA_REMINDER_AUDIO_TYPE, reminder.audioType)
+            putExtra(ReminderAlarmContract.EXTRA_REMINDER_AUDIO_ASSET_ID, reminder.audioAssetId)
             putExtra(ReminderAlarmContract.EXTRA_REMINDER_AUDIO_URL, reminder.audioUrl)
             putExtra(
                 ReminderAlarmContract.EXTRA_REMINDER_AUDIO_CONTENT_TYPE,
                 reminder.audioContentType,
             )
             putExtra(ReminderAlarmContract.EXTRA_REMINDER_AUDIO_FILENAME, reminder.audioFilename)
+            reminder.audioSize?.let {
+                putExtra(ReminderAlarmContract.EXTRA_REMINDER_AUDIO_SIZE, it)
+            }
+            putExtra(ReminderAlarmContract.EXTRA_REMINDER_AUDIO_CHECKSUM, reminder.audioChecksum)
+            putExtra(
+                ReminderAlarmContract.EXTRA_REMINDER_AUDIO_UPDATED_AT,
+                reminder.audioUpdatedAt,
+            )
+            putExtra(ReminderAlarmContract.EXTRA_REMINDER_AUDIO_LOCAL_PATH, reminder.audioLocalPath)
+            putExtra(
+                ReminderAlarmContract.EXTRA_REMINDER_AUDIO_CACHE_STATUS,
+                reminder.audioCacheStatus,
+            )
         }
 
     private fun alarmPendingIntent(context: Context): PendingIntent {

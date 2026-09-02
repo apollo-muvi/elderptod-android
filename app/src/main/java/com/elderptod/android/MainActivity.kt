@@ -12,6 +12,7 @@ import android.media.MediaPlayer
 import android.media.Ringtone
 import android.media.RingtoneManager
 import android.media.ToneGenerator
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -72,6 +73,7 @@ import java.net.URI
 import java.net.URLDecoder
 import java.net.UnknownHostException
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.time.OffsetDateTime
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -98,7 +100,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private val signalingClient by lazy { SignalingClient(httpClient, mainHandler, this) }
     private val reminderLocalStore by lazy { ReminderLocalStore(this) }
     private val reminderTts by lazy { ReminderTtsManager(this, mainHandler) }
-    private val reminderAudioPlayer by lazy { ReminderAudioPlayer(mainHandler) }
+    private val reminderAudioPlayer by lazy { ReminderAudioPlayer(this, mainHandler) }
     private val reminderAudioCache by lazy { ReminderAudioCache(this, httpClient) }
     private val webrtc by lazy { WebRtcCallManager(this, mainHandler, this) }
     private val httpClient = OkHttpClient.Builder()
@@ -258,8 +260,12 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             serverTime = serverTime,
             reminders = reminders,
         )
-        reminderAudioCache.prefetch(reminders) { audioUrl ->
-            reminderAudioPlaybackUrl(audioUrl)
+        reminderAudioCache.prefetch(
+            reminders = reminders,
+            deviceToken = deviceToken(),
+            store = reminderLocalStore,
+        ) { audioAssetId, audioUrl ->
+            reminderAudioPlaybackUrl(audioAssetId, audioUrl)
         }
         ReminderAlarmScheduler.scheduleNext(this, reminderLocalStore)
         if (activeCall == null && !reminderUiActive) {
@@ -294,6 +300,9 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
                 reminderId = reminderId,
                 audioType = intent.getStringExtra(ReminderAlarmContract.EXTRA_REMINDER_AUDIO_TYPE)
                     ?: "tts",
+                audioAssetId = intent.getStringExtra(
+                    ReminderAlarmContract.EXTRA_REMINDER_AUDIO_ASSET_ID,
+                ),
                 audioUrl = intent.getStringExtra(ReminderAlarmContract.EXTRA_REMINDER_AUDIO_URL),
                 audioContentType = intent.getStringExtra(
                     ReminderAlarmContract.EXTRA_REMINDER_AUDIO_CONTENT_TYPE,
@@ -301,8 +310,33 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
                 audioFilename = intent.getStringExtra(
                     ReminderAlarmContract.EXTRA_REMINDER_AUDIO_FILENAME,
                 ),
+                audioSize = if (
+                    intent.hasExtra(ReminderAlarmContract.EXTRA_REMINDER_AUDIO_SIZE)
+                ) {
+                    intent.getLongExtra(ReminderAlarmContract.EXTRA_REMINDER_AUDIO_SIZE, 0L)
+                } else {
+                    null
+                },
+                audioChecksum = intent.getStringExtra(
+                    ReminderAlarmContract.EXTRA_REMINDER_AUDIO_CHECKSUM,
+                ),
+                audioUpdatedAt = intent.getStringExtra(
+                    ReminderAlarmContract.EXTRA_REMINDER_AUDIO_UPDATED_AT,
+                ),
+                audioLocalPath = intent.getStringExtra(
+                    ReminderAlarmContract.EXTRA_REMINDER_AUDIO_LOCAL_PATH,
+                ),
+                audioCacheStatus = intent.getStringExtra(
+                    ReminderAlarmContract.EXTRA_REMINDER_AUDIO_CACHE_STATUS,
+                ) ?: "not_required",
             )
-        if (reminder.message.isBlank() && reminder.audioUrl.isNullOrBlank()) return
+        if (
+            reminder.message.isBlank() &&
+            reminder.audioAssetId.isNullOrBlank() &&
+            reminder.audioUrl.isNullOrBlank()
+        ) {
+            return
+        }
         handleTriggeredReminder(reminder, reportToBackend = false)
     }
 
@@ -791,7 +825,10 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         )
         content.addView(
             ui.audioStatusRow(
-                if (reminder.audioType == "tts" || reminder.audioUrl.isNullOrBlank()) {
+                if (
+                    reminder.audioType == "tts" ||
+                    (reminder.audioAssetId.isNullOrBlank() && reminder.audioUrl.isNullOrBlank())
+                ) {
                     "正在播放中文語音提醒"
                 } else {
                     "正在播放錄音提醒"
@@ -838,11 +875,14 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     }
 
     private fun playReminderAudioOrTts(reminder: ReminderState, key: String) {
-        val audioUrl = reminder.audioUrl
-        if (reminder.audioType != "tts" && !audioUrl.isNullOrBlank()) {
+        if (
+            reminder.audioType != "tts" &&
+            (!reminder.audioAssetId.isNullOrBlank() || !reminder.audioUrl.isNullOrBlank())
+        ) {
+            val cachedUrl = reminderAudioCache.cachedAudioUrl(reminder)
             reminderAudioPlayer.play(
-                url = reminderAudioCache.cachedAudioUrl(reminder)
-                    ?: reminderAudioPlaybackUrl(audioUrl),
+                url = cachedUrl ?: reminderAudioPlaybackUrl(reminder.audioAssetId, reminder.audioUrl),
+                headers = if (cachedUrl == null) reminderAudioHeaders(reminder) else emptyMap(),
                 onDone = { onReminderSpeechDone(reminder, key) },
                 onError = {
                     val fallbackMessage = reminder.message.ifBlank { "提醒時間到了" }
@@ -876,6 +916,31 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         reminder.reminderId
             ?: reminder.notificationId
             ?: "${reminder.title}|${reminder.message}|${reminder.timeText}"
+
+    private fun reminderAudioPlaybackUrl(audioAssetId: String?, audioUrl: String?): String {
+        val path = if (!audioAssetId.isNullOrBlank()) {
+            "/api/audio-assets/$audioAssetId"
+        } else {
+            audioUrl.orEmpty()
+        }
+        if (path.startsWith("http://") || path.startsWith("https://")) {
+            return path
+        }
+        if (path.isBlank()) {
+            return DEFAULT_BASE_URL
+        }
+        val baseUrl = (prefs.getString(KEY_BASE_URL, DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL)
+            .trimEnd('/')
+        return if (path.startsWith("/")) "$baseUrl$path" else "$baseUrl/$path"
+    }
+
+    private fun reminderAudioHeaders(reminder: ReminderState): Map<String, String> {
+        if (reminder.audioAssetId.isNullOrBlank()) {
+            return emptyMap()
+        }
+        val token = deviceToken() ?: return emptyMap()
+        return mapOf("X-Elder-Device-Token" to token)
+    }
 
     private fun reminderAudioPlaybackUrl(audioUrl: String): String {
         if (audioUrl.startsWith("http://") || audioUrl.startsWith("https://")) {
@@ -1256,9 +1321,15 @@ data class ReminderState(
     val reminderId: String? = null,
     val notificationId: String? = null,
     val audioType: String = "tts",
+    val audioAssetId: String? = null,
     val audioUrl: String? = null,
     val audioContentType: String? = null,
     val audioFilename: String? = null,
+    val audioSize: Long? = null,
+    val audioChecksum: String? = null,
+    val audioUpdatedAt: String? = null,
+    val audioLocalPath: String? = null,
+    val audioCacheStatus: String = "not_required",
 )
 
 private data class PairingQr(
@@ -1437,11 +1508,17 @@ private class ReminderTtsManager(
 }
 
 private class ReminderAudioPlayer(
+    private val context: Context,
     private val mainHandler: Handler,
 ) {
     private var player: MediaPlayer? = null
 
-    fun play(url: String, onDone: () -> Unit, onError: () -> Unit) {
+    fun play(
+        url: String,
+        headers: Map<String, String> = emptyMap(),
+        onDone: () -> Unit,
+        onError: () -> Unit,
+    ) {
         stop()
         val mediaPlayer = MediaPlayer()
         player = mediaPlayer
@@ -1470,7 +1547,7 @@ private class ReminderAudioPlayer(
                 }
                 true
             }
-            mediaPlayer.setDataSource(url)
+            mediaPlayer.setDataSource(context.applicationContext, Uri.parse(url), headers)
             mediaPlayer.prepareAsync()
         } catch (error: Exception) {
             Log.e(LOG_TAG, "reminder audio play failed", error)
@@ -1501,27 +1578,78 @@ private class ReminderAudioCache(
 ) {
     private val cacheDir = File(context.applicationContext.filesDir, "reminder_audio_cache")
 
-    fun prefetch(reminders: List<ReminderDefinition>, resolveUrl: (String) -> String) {
+    fun prefetch(
+        reminders: List<ReminderDefinition>,
+        deviceToken: String?,
+        store: ReminderLocalStore,
+        resolveUrl: (String?, String?) -> String,
+    ) {
         cacheDir.mkdirs()
         reminders
             .filter { reminder ->
-                reminder.audioType != "tts" && !reminder.audioUrl.isNullOrBlank()
+                reminder.audioType != "tts" &&
+                    (!reminder.audioAssetId.isNullOrBlank() || !reminder.audioUrl.isNullOrBlank())
             }
             .forEach { reminder ->
-                val audioUrl = reminder.audioUrl ?: return@forEach
-                val target = cacheFile(reminder.id, audioUrl)
-                if (target.isFile && target.length() > 0L) {
+                val target = cacheFile(
+                    reminderId = reminder.id,
+                    audioAssetId = reminder.audioAssetId,
+                    audioUrl = reminder.audioUrl,
+                    audioContentType = reminder.audioContentType,
+                    audioChecksum = reminder.audioChecksum,
+                )
+                if (isUsableCacheFile(target, reminder.audioChecksum)) {
+                    store.updateAudioCacheState(
+                        reminder.id,
+                        target.absolutePath,
+                        reminder.audioChecksum,
+                        "ready",
+                    )
                     return@forEach
                 }
-                val request = Request.Builder().url(resolveUrl(audioUrl)).get().build()
+                val requestBuilder = Request.Builder()
+                    .url(resolveUrl(reminder.audioAssetId, reminder.audioUrl))
+                    .get()
+                if (!reminder.audioAssetId.isNullOrBlank()) {
+                    val token = deviceToken
+                    if (token.isNullOrBlank()) {
+                        store.updateAudioCacheState(
+                            reminder.id,
+                            null,
+                            reminder.audioChecksum,
+                            "failed",
+                        )
+                        return@forEach
+                    }
+                    requestBuilder.header("X-Elder-Device-Token", token)
+                }
+                store.updateAudioCacheState(
+                    reminder.id,
+                    null,
+                    reminder.audioChecksum,
+                    "downloading",
+                )
+                val request = requestBuilder.build()
                 client.newCall(request).enqueue(object : Callback {
                     override fun onFailure(call: Call, error: IOException) {
+                        store.updateAudioCacheState(
+                            reminder.id,
+                            null,
+                            reminder.audioChecksum,
+                            "failed",
+                        )
                         Log.w(LOG_TAG, "reminder audio cache failed id=${reminder.id}", error)
                     }
 
                     override fun onResponse(call: Call, response: Response) {
                         response.use {
                             if (!it.isSuccessful) {
+                                store.updateAudioCacheState(
+                                    reminder.id,
+                                    null,
+                                    reminder.audioChecksum,
+                                    "failed",
+                                )
                                 Log.w(
                                     LOG_TAG,
                                     "reminder audio cache http=${it.code} id=${reminder.id}",
@@ -1529,11 +1657,42 @@ private class ReminderAudioCache(
                                 return
                             }
                             val bytes = it.body?.bytes() ?: return
-                            if (bytes.isEmpty()) return
+                            if (bytes.isEmpty()) {
+                                store.updateAudioCacheState(
+                                    reminder.id,
+                                    null,
+                                    reminder.audioChecksum,
+                                    "failed",
+                                )
+                                return
+                            }
+                            if (!checksumMatches(bytes, reminder.audioChecksum)) {
+                                target.delete()
+                                store.updateAudioCacheState(
+                                    reminder.id,
+                                    null,
+                                    reminder.audioChecksum,
+                                    "failed",
+                                )
+                                Log.w(LOG_TAG, "reminder audio checksum mismatch id=${reminder.id}")
+                                return
+                            }
                             try {
                                 target.writeBytes(bytes)
+                                store.updateAudioCacheState(
+                                    reminder.id,
+                                    target.absolutePath,
+                                    reminder.audioChecksum,
+                                    "ready",
+                                )
                                 Log.i(LOG_TAG, "reminder audio cached id=${reminder.id}")
                             } catch (error: IOException) {
+                                store.updateAudioCacheState(
+                                    reminder.id,
+                                    null,
+                                    reminder.audioChecksum,
+                                    "failed",
+                                )
                                 Log.w(
                                     LOG_TAG,
                                     "reminder audio cache write failed id=${reminder.id}",
@@ -1548,19 +1707,73 @@ private class ReminderAudioCache(
 
     fun cachedAudioUrl(reminder: ReminderState): String? {
         val reminderId = reminder.reminderId ?: return null
-        val audioUrl = reminder.audioUrl ?: return null
-        val file = cacheFile(reminderId, audioUrl)
-        return if (file.isFile && file.length() > 0L) file.toURI().toString() else null
+        val localPath = reminder.audioLocalPath
+        if (!localPath.isNullOrBlank()) {
+            val localFile = File(localPath)
+            if (isUsableCacheFile(localFile, reminder.audioChecksum)) {
+                return localFile.toURI().toString()
+            }
+        }
+        val file = cacheFile(
+            reminderId = reminderId,
+            audioAssetId = reminder.audioAssetId,
+            audioUrl = reminder.audioUrl,
+            audioContentType = reminder.audioContentType,
+            audioChecksum = reminder.audioChecksum,
+        )
+        return if (isUsableCacheFile(file, reminder.audioChecksum)) {
+            file.toURI().toString()
+        } else {
+            null
+        }
     }
 
-    private fun cacheFile(reminderId: String, audioUrl: String): File {
+    private fun cacheFile(
+        reminderId: String,
+        audioAssetId: String?,
+        audioUrl: String?,
+        audioContentType: String?,
+        audioChecksum: String?,
+    ): File {
         val safeId = reminderId.replace(Regex("[^A-Za-z0-9_-]"), "_")
-        val key = Integer.toHexString(audioUrl.hashCode())
-        val suffix = audioUrl.substringBefore("?").substringAfterLast(".", "bin")
-            .takeIf { it.length in 2..5 }
-            ?: "bin"
-        return File(cacheDir, "${safeId}_${key}.$suffix")
+        val keySource = audioAssetId ?: audioUrl.orEmpty()
+        val key = keySource.replace(Regex("[^A-Za-z0-9_-]"), "_")
+            .ifBlank { Integer.toHexString(keySource.hashCode()) }
+            .take(80)
+        val version = audioChecksum?.take(12) ?: Integer.toHexString(keySource.hashCode())
+        val suffix = audioExtension(audioContentType, audioUrl)
+        return File(cacheDir, "${safeId}_${key}_$version.$suffix")
     }
+
+    private fun isUsableCacheFile(file: File, expectedChecksum: String?): Boolean {
+        if (!file.isFile || file.length() <= 0L) return false
+        if (expectedChecksum.isNullOrBlank()) return true
+        return checksumMatches(file.readBytes(), expectedChecksum)
+    }
+
+    private fun checksumMatches(bytes: ByteArray, expectedChecksum: String?): Boolean {
+        if (expectedChecksum.isNullOrBlank()) return true
+        return sha256Hex(bytes).equals(expectedChecksum, ignoreCase = true)
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest(bytes)
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+
+    private fun audioExtension(audioContentType: String?, audioUrl: String?): String =
+        when (audioContentType?.substringBefore(";")?.lowercase(Locale.US)) {
+            "audio/aac" -> "aac"
+            "audio/3gpp" -> "3gp"
+            "audio/m4a", "audio/mp4", "audio/x-m4a" -> "m4a"
+            "audio/mpeg" -> "mp3"
+            "audio/ogg" -> "ogg"
+            "audio/wav", "audio/x-wav" -> "wav"
+            "audio/webm" -> "webm"
+            else -> audioUrl?.substringBefore("?")?.substringAfterLast(".", "bin")
+                ?.takeIf { it.length in 2..5 }
+                ?: "bin"
+        }
 }
 
 private class BackendClient(
@@ -1801,6 +2014,8 @@ private class SignalingClient(
             "notification" -> {
                 val notification = message.optJSONObject("notification") ?: return
                 if (notification.optString("kind") != "reminder") return
+                val audioAssetId = notification.optString("audio_asset_id").ifBlank { null }
+                val audioUrl = notification.optString("audio_url").ifBlank { null }
                 listener.onNotification(
                     ReminderState(
                         title = notification.optString("title"),
@@ -1809,10 +2024,15 @@ private class SignalingClient(
                         reminderId = notification.optString("reminder_id").ifBlank { null },
                         notificationId = notification.optString("id"),
                         audioType = notification.optString("audio_type", "tts"),
-                        audioUrl = notification.optString("audio_url").ifBlank { null },
+                        audioAssetId = audioAssetId,
+                        audioUrl = audioUrl,
                         audioContentType = notification.optString("audio_content_type")
                             .ifBlank { null },
                         audioFilename = notification.optString("audio_filename").ifBlank { null },
+                        audioSize = notification.optNullableLong("audio_size"),
+                        audioChecksum = notification.optString("audio_checksum").ifBlank { null },
+                        audioUpdatedAt = notification.optString("audio_updated_at")
+                            .ifBlank { null },
                     ),
                 )
             }
@@ -2549,8 +2769,14 @@ private fun parseReminderState(reminder: JSONObject?): ReminderState? {
     if (reminder == null) return null
     val title = reminder.optString("title")
     val message = reminder.optString("message")
+    val audioAssetId = reminder.optString("audio_asset_id").ifBlank { null }
     val audioUrl = reminder.optString("audio_url").ifBlank { null }
-    if (title.isBlank() || (message.isBlank() && audioUrl.isNullOrBlank())) return null
+    if (
+        title.isBlank() ||
+        (message.isBlank() && audioAssetId.isNullOrBlank() && audioUrl.isNullOrBlank())
+    ) {
+        return null
+    }
     return ReminderState(
         title = title,
         message = message,
@@ -2558,9 +2784,13 @@ private fun parseReminderState(reminder: JSONObject?): ReminderState? {
         reminderId = reminder.optString("id").ifBlank { null },
         notificationId = reminder.optString("notification_id").ifBlank { null },
         audioType = reminder.optString("audio_type", "tts"),
+        audioAssetId = audioAssetId,
         audioUrl = audioUrl,
         audioContentType = reminder.optString("audio_content_type").ifBlank { null },
         audioFilename = reminder.optString("audio_filename").ifBlank { null },
+        audioSize = reminder.optNullableLong("audio_size"),
+        audioChecksum = reminder.optString("audio_checksum").ifBlank { null },
+        audioUpdatedAt = reminder.optString("audio_updated_at").ifBlank { null },
     )
 }
 
@@ -2573,11 +2803,12 @@ private fun parseReminderDefinitions(array: JSONArray?): List<ReminderDefinition
         val title = item.optString("title")
         val message = item.optString("message")
         val scheduledAt = item.optString("scheduled_at")
+        val audioAssetId = item.optString("audio_asset_id").ifBlank { null }
         val audioUrl = item.optString("audio_url").ifBlank { null }
         if (
             id.isBlank() ||
             title.isBlank() ||
-            (message.isBlank() && audioUrl.isNullOrBlank()) ||
+            (message.isBlank() && audioAssetId.isNullOrBlank() && audioUrl.isNullOrBlank()) ||
             scheduledAt.isBlank()
         ) {
             continue
@@ -2591,13 +2822,20 @@ private fun parseReminderDefinitions(array: JSONArray?): List<ReminderDefinition
             enabled = item.optBoolean("enabled", true),
             updatedAt = item.optString("updated_at"),
             audioType = item.optString("audio_type", "tts"),
+            audioAssetId = audioAssetId,
             audioUrl = audioUrl,
             audioContentType = item.optString("audio_content_type").ifBlank { null },
             audioFilename = item.optString("audio_filename").ifBlank { null },
+            audioSize = item.optNullableLong("audio_size"),
+            audioChecksum = item.optString("audio_checksum").ifBlank { null },
+            audioUpdatedAt = item.optString("audio_updated_at").ifBlank { null },
         )
     }
     return reminders
 }
+
+private fun JSONObject.optNullableLong(name: String): Long? =
+    if (has(name) && !isNull(name)) optLong(name) else null
 
 fun formatReminderTime(value: String): String =
     try {
