@@ -93,10 +93,33 @@ object ReminderAlarmScheduler {
         if (triggerAtMs <= nowMs) return
 
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !alarmManager.canScheduleExactAlarms()) {
-                alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMs, pendingIntent)
+            val reminder = store.reminderById(next.reminderId)
+            if (reminder != null) {
+                val showIntent = PendingIntent.getActivity(
+                    appContext,
+                    REMINDER_ALARM_REQUEST_CODE + 1,
+                    showReminderIntent(appContext, reminder),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                )
+                alarmManager.setAlarmClock(
+                    AlarmManager.AlarmClockInfo(triggerAtMs, showIntent),
+                    pendingIntent,
+                )
+            } else if (
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                !alarmManager.canScheduleExactAlarms()
+            ) {
+                alarmManager.setAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    triggerAtMs,
+                    pendingIntent,
+                )
             } else {
-                alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMs, pendingIntent)
+                alarmManager.setExactAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    triggerAtMs,
+                    pendingIntent,
+                )
             }
             store.markExecutionState(next.reminderId, "scheduled_locally")
             Log.i(LOG_TAG, "scheduled local reminder id=${next.reminderId} at=${next.scheduledAt}")
@@ -160,6 +183,7 @@ object ReminderAlarmScheduler {
             .setTimeoutAfter(30_000L)
             .setAutoCancel(true)
             .setContentIntent(contentIntent)
+            .setFullScreenIntent(contentIntent, true)
             .build()
         val notificationManager = NotificationManagerCompat.from(appContext)
         notificationManager.cancel(notificationId)

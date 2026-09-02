@@ -177,6 +177,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        allowReminderOverLockScreen()
         buildShell()
         reminderTts.initialize()
         migrateLocalBackendUrl()
@@ -190,6 +191,20 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             startOnline()
             handleLaunchIntent(intent)
         }
+    }
+
+    private fun allowReminderOverLockScreen() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+            return
+        }
+        @Suppress("DEPRECATION")
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD,
+        )
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -2014,25 +2029,23 @@ private class SignalingClient(
             "notification" -> {
                 val notification = message.optJSONObject("notification") ?: return
                 if (notification.optString("kind") != "reminder") return
-                val audioAssetId = notification.optString("audio_asset_id").ifBlank { null }
-                val audioUrl = notification.optString("audio_url").ifBlank { null }
+                val audioAssetId = notification.optNullableString("audio_asset_id")
+                val audioUrl = notification.optNullableString("audio_url")
                 listener.onNotification(
                     ReminderState(
                         title = notification.optString("title"),
                         message = notification.optString("message"),
                         timeText = "現在",
-                        reminderId = notification.optString("reminder_id").ifBlank { null },
+                        reminderId = notification.optNullableString("reminder_id"),
                         notificationId = notification.optString("id"),
                         audioType = notification.optString("audio_type", "tts"),
                         audioAssetId = audioAssetId,
                         audioUrl = audioUrl,
-                        audioContentType = notification.optString("audio_content_type")
-                            .ifBlank { null },
-                        audioFilename = notification.optString("audio_filename").ifBlank { null },
+                        audioContentType = notification.optNullableString("audio_content_type"),
+                        audioFilename = notification.optNullableString("audio_filename"),
                         audioSize = notification.optNullableLong("audio_size"),
-                        audioChecksum = notification.optString("audio_checksum").ifBlank { null },
-                        audioUpdatedAt = notification.optString("audio_updated_at")
-                            .ifBlank { null },
+                        audioChecksum = notification.optNullableString("audio_checksum"),
+                        audioUpdatedAt = notification.optNullableString("audio_updated_at"),
                     ),
                 )
             }
@@ -2769,8 +2782,8 @@ private fun parseReminderState(reminder: JSONObject?): ReminderState? {
     if (reminder == null) return null
     val title = reminder.optString("title")
     val message = reminder.optString("message")
-    val audioAssetId = reminder.optString("audio_asset_id").ifBlank { null }
-    val audioUrl = reminder.optString("audio_url").ifBlank { null }
+    val audioAssetId = reminder.optNullableString("audio_asset_id")
+    val audioUrl = reminder.optNullableString("audio_url")
     if (
         title.isBlank() ||
         (message.isBlank() && audioAssetId.isNullOrBlank() && audioUrl.isNullOrBlank())
@@ -2781,16 +2794,16 @@ private fun parseReminderState(reminder: JSONObject?): ReminderState? {
         title = title,
         message = message,
         timeText = formatReminderTime(reminder.optString("scheduled_at")),
-        reminderId = reminder.optString("id").ifBlank { null },
-        notificationId = reminder.optString("notification_id").ifBlank { null },
+        reminderId = reminder.optNullableString("id"),
+        notificationId = reminder.optNullableString("notification_id"),
         audioType = reminder.optString("audio_type", "tts"),
         audioAssetId = audioAssetId,
         audioUrl = audioUrl,
-        audioContentType = reminder.optString("audio_content_type").ifBlank { null },
-        audioFilename = reminder.optString("audio_filename").ifBlank { null },
+        audioContentType = reminder.optNullableString("audio_content_type"),
+        audioFilename = reminder.optNullableString("audio_filename"),
         audioSize = reminder.optNullableLong("audio_size"),
-        audioChecksum = reminder.optString("audio_checksum").ifBlank { null },
-        audioUpdatedAt = reminder.optString("audio_updated_at").ifBlank { null },
+        audioChecksum = reminder.optNullableString("audio_checksum"),
+        audioUpdatedAt = reminder.optNullableString("audio_updated_at"),
     )
 }
 
@@ -2803,8 +2816,8 @@ private fun parseReminderDefinitions(array: JSONArray?): List<ReminderDefinition
         val title = item.optString("title")
         val message = item.optString("message")
         val scheduledAt = item.optString("scheduled_at")
-        val audioAssetId = item.optString("audio_asset_id").ifBlank { null }
-        val audioUrl = item.optString("audio_url").ifBlank { null }
+        val audioAssetId = item.optNullableString("audio_asset_id")
+        val audioUrl = item.optNullableString("audio_url")
         if (
             id.isBlank() ||
             title.isBlank() ||
@@ -2824,14 +2837,20 @@ private fun parseReminderDefinitions(array: JSONArray?): List<ReminderDefinition
             audioType = item.optString("audio_type", "tts"),
             audioAssetId = audioAssetId,
             audioUrl = audioUrl,
-            audioContentType = item.optString("audio_content_type").ifBlank { null },
-            audioFilename = item.optString("audio_filename").ifBlank { null },
+            audioContentType = item.optNullableString("audio_content_type"),
+            audioFilename = item.optNullableString("audio_filename"),
             audioSize = item.optNullableLong("audio_size"),
-            audioChecksum = item.optString("audio_checksum").ifBlank { null },
-            audioUpdatedAt = item.optString("audio_updated_at").ifBlank { null },
+            audioChecksum = item.optNullableString("audio_checksum"),
+            audioUpdatedAt = item.optNullableString("audio_updated_at"),
         )
     }
     return reminders
+}
+
+private fun JSONObject.optNullableString(name: String): String? {
+    if (!has(name) || isNull(name)) return null
+    val value = optString(name).trim()
+    return value.takeUnless { it.isBlank() || it == "null" }
 }
 
 private fun JSONObject.optNullableLong(name: String): Long? =
