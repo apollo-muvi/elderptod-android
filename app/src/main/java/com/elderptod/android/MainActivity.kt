@@ -278,6 +278,14 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         }
     }
 
+    override fun onTasksUpdated(taskDate: String, tasks: List<TaskState>) {
+        Log.i(LOG_TAG, "tasks_updated date=$taskDate count=${tasks.size}")
+        todayTasks = tasks
+        if (activeCall == null && !reminderUiActive) {
+            showIdle()
+        }
+    }
+
     override fun onRemindersSynced(
         deviceId: String,
         syncVersion: Long,
@@ -1696,6 +1704,7 @@ interface SignalingListener {
     )
     fun onConfigUpdated(settings: JSONObject?)
     fun onRemindersUpdated(next: ReminderState?)
+    fun onTasksUpdated(taskDate: String, tasks: List<TaskState>)
     fun onRemindersSynced(
         deviceId: String,
         syncVersion: Long,
@@ -2349,6 +2358,10 @@ private class SignalingClient(
             "config_updated" -> listener.onConfigUpdated(message.optJSONObject("settings"))
             "reminders_updated" -> listener.onRemindersUpdated(
                 parseReminderState(message.optJSONObject("next_reminder")),
+            )
+            "tasks_updated" -> listener.onTasksUpdated(
+                message.optString("date"),
+                parseTaskStates(message.optJSONArray("tasks")),
             )
             "reminders_synced" -> listener.onRemindersSynced(
                 deviceId = message.optString("device_id"),
