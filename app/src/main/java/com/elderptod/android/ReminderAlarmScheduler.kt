@@ -253,6 +253,25 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
     }
 }
 
+class ReminderRescheduleReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val action = intent.action ?: return
+        if (action !in RESCHEDULE_ACTIONS) return
+
+        Log.i(LOG_TAG, "reschedule local reminders after $action")
+        ReminderAlarmScheduler.scheduleNext(context.applicationContext)
+    }
+
+    private companion object {
+        val RESCHEDULE_ACTIONS = setOf(
+            Intent.ACTION_BOOT_COMPLETED,
+            Intent.ACTION_MY_PACKAGE_REPLACED,
+            Intent.ACTION_TIME_CHANGED,
+            Intent.ACTION_TIMEZONE_CHANGED,
+        )
+    }
+}
+
 private fun createReminderChannel(context: Context) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
     val manager = context.getSystemService(NotificationManager::class.java)
