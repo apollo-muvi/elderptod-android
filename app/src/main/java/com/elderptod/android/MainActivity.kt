@@ -298,7 +298,10 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     }
 
     override fun onNotification(reminder: ReminderState) {
-        Log.i(LOG_TAG, "notification id=${reminder.notificationId} title=${reminder.title}")
+        Log.i(
+            LOG_TAG,
+            "notification kind=${reminder.kind} id=${reminder.notificationId} title=${reminder.title}",
+        )
         handleTriggeredReminder(reminder, reportToBackend = true)
     }
 
@@ -849,9 +852,9 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
                     reminder.audioType == "tts" ||
                     (reminder.audioAssetId.isNullOrBlank() && reminder.audioUrl.isNullOrBlank())
                 ) {
-                    "正在播放中文語音提醒"
+                    "正在播放中文語音${notificationLabel(reminder)}"
                 } else {
-                    "正在播放錄音提醒"
+                    "正在播放錄音${notificationLabel(reminder)}"
                 },
             ),
             ui.matchWrap(),
@@ -905,7 +908,9 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
                 headers = if (cachedUrl == null) reminderAudioHeaders(reminder) else emptyMap(),
                 onDone = { onReminderSpeechDone(reminder, key) },
                 onError = {
-                    val fallbackMessage = reminder.message.ifBlank { "提醒時間到了" }
+                    val fallbackMessage = reminder.message.ifBlank {
+                        notificationFallbackMessage(reminder)
+                    }
                     reminderTts.speak(fallbackMessage) {
                         onReminderSpeechDone(reminder, key)
                     }
@@ -913,7 +918,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             )
             return
         }
-        reminderTts.speak(reminder.message.ifBlank { "提醒時間到了" }) {
+        reminderTts.speak(reminder.message.ifBlank { notificationFallbackMessage(reminder) }) {
             onReminderSpeechDone(reminder, key)
         }
     }
@@ -936,6 +941,12 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         reminder.reminderId
             ?: reminder.notificationId
             ?: "${reminder.title}|${reminder.message}|${reminder.timeText}"
+
+    private fun notificationLabel(reminder: ReminderState): String =
+        if (reminder.kind == "task") "任務" else "提醒"
+
+    private fun notificationFallbackMessage(reminder: ReminderState): String =
+        if (reminder.kind == "task") "任務時間到了" else "提醒時間到了"
 
     private fun reminderAudioPlaybackUrl(audioAssetId: String?, audioUrl: String?): String {
         val path = if (!audioAssetId.isNullOrBlank()) {
@@ -989,8 +1000,12 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         content.addView(
             ui.stateScreen(
                 symbol = "✓",
-                title = "已經通知家人",
-                detail = "家人端會看到確認時間",
+                title = if (reminder.kind == "task") "已完成任務" else "已經通知家人",
+                detail = if (reminder.kind == "task") {
+                    "家人端會看到完成時間"
+                } else {
+                    "家人端會看到確認時間"
+                },
             ),
             ui.matchWrap(),
         )
@@ -1348,6 +1363,7 @@ data class ReminderState(
     val title: String,
     val message: String,
     val timeText: String,
+    val kind: String = "reminder",
     val reminderId: String? = null,
     val notificationId: String? = null,
     val audioType: String = "tts",
@@ -2043,7 +2059,8 @@ private class SignalingClient(
             )
             "notification" -> {
                 val notification = message.optJSONObject("notification") ?: return
-                if (notification.optString("kind") != "reminder") return
+                val kind = notification.optString("kind", "reminder")
+                if (kind != "reminder" && kind != "task") return
                 val audioAssetId = notification.optNullableString("audio_asset_id")
                 val audioUrl = notification.optNullableString("audio_url")
                 listener.onNotification(
@@ -2051,6 +2068,7 @@ private class SignalingClient(
                         title = notification.optString("title"),
                         message = notification.optString("message"),
                         timeText = "現在",
+                        kind = kind,
                         reminderId = notification.optNullableString("reminder_id"),
                         notificationId = notification.optString("id"),
                         audioType = notification.optString("audio_type", "tts"),

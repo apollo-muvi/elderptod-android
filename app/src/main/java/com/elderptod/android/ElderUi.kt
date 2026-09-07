@@ -507,7 +507,7 @@ class ElderUi(
             setPadding(dp(8), dp(14), dp(8), dp(8))
             addView(
                 centeredText(48f, ElderColors.PRIMARY).apply {
-                    text = "鈴"
+                    text = if (reminder.kind == "task") "做" else "鈴"
                     typeface = Typeface.DEFAULT_BOLD
                     includeFontPadding = false
                     background = rounded(ElderColors.PRIMARY_SOFT, dp(999).toFloat())
@@ -536,7 +536,9 @@ class ElderUi(
             )
             addView(
                 TextView(context).apply {
-                    text = reminder.message.ifBlank { "正在播放錄音提醒" }
+                    text = reminder.message.ifBlank {
+                        if (reminder.kind == "task") "正在播放今日任務" else "正在播放錄音提醒"
+                    }
                     textSize = sp(ElderType.MESSAGE)
                     gravity = Gravity.CENTER
                     maxLines = 6
