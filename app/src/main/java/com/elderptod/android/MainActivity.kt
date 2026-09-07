@@ -373,16 +373,20 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         }
         nextReminder = null
         if (activeCall != null) {
-            reminderLocalStore.markExecutionState(reminder.reminderId, "failed", "DEVICE_BUSY")
-            ReminderAlarmScheduler.scheduleNext(this, reminderLocalStore)
-            if (reportToBackend) {
-                signalingClient.sendNotificationEvent(
-                    reminder.notificationId,
-                    "failed",
-                    "DEVICE_BUSY",
-                )
+            if (isPriorityInterrupt(reminder)) {
+                interruptActiveCallForNotification(reminder)
+            } else {
+                reminderLocalStore.markExecutionState(reminder.reminderId, "failed", "DEVICE_BUSY")
+                ReminderAlarmScheduler.scheduleNext(this, reminderLocalStore)
+                if (reportToBackend) {
+                    signalingClient.sendNotificationEvent(
+                        reminder.notificationId,
+                        "failed",
+                        "DEVICE_BUSY",
+                    )
+                }
+                return
             }
-            return
         }
         reminderLocalStore.markExecutionState(reminder.reminderId, "triggered")
         reminderLocalStore.markExecutionState(reminder.reminderId, "received")
@@ -394,6 +398,22 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             signalingClient.sendNotificationEvent(reminder.notificationId, "received")
         }
         playReminder(reminder, reportToBackend)
+    }
+
+    private fun isPriorityInterrupt(reminder: ReminderState): Boolean =
+        reminder.kind == "emergency" ||
+            reminder.priority == "urgent" ||
+            reminder.priority == "emergency"
+
+    private fun interruptActiveCallForNotification(reminder: ReminderState) {
+        val call = activeCall ?: return
+        Log.i(
+            LOG_TAG,
+            "priority_notification_interrupt kind=${reminder.kind} priority=${reminder.priority} " +
+                "callId=${call.id}",
+        )
+        signalingClient.sendCallEvent("hangup", call.id)
+        endLocalCall("ended")
     }
 
     override fun onCallUpdated(call: CallState) {
