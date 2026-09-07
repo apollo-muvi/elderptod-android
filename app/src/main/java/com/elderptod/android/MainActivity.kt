@@ -94,6 +94,7 @@ private const val REMINDER_REPLAY_DELAY_MS = 25_000L
 private const val REMINDER_MAX_PLAY_COUNT = 3
 private const val PRIORITY_ALERT_TONE_MS = 650L
 private const val PRIORITY_ALERT_SPEECH_DELAY_MS = 800L
+const val TODAY_TASK_DISPLAY_LIMIT = 5
 const val LOG_TAG = "ElderPTOD"
 class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -172,6 +173,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private var activeReminderReportsToBackend = false
     private var reminderPlayCount = 0
     private var nextReminder: ReminderState? = null
+    private var todayTasks: List<TaskState> = emptyList()
     private var activeSpokenNotification: QueuedNotification? = null
     private var pendingSpokenNotification: QueuedNotification? = null
     private var pendingPriorityNotification: QueuedNotification? = null
@@ -243,11 +245,17 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         super.onDestroy()
     }
 
-    override fun onHelloAck(deviceName: String, settings: JSONObject?, next: JSONObject?) {
+    override fun onHelloAck(
+        deviceName: String,
+        settings: JSONObject?,
+        next: JSONObject?,
+        tasks: List<TaskState>,
+    ) {
         Log.i(LOG_TAG, "hello_ack deviceName=$deviceName")
         remotePlaybackGainProfile = remoteAudioGainProfile(settings)
         webrtc.setRemoteAudioGain(remoteAudioGain(settings))
         nextReminder = parseReminderState(next)
+        todayTasks = tasks
         status.text = "可以使用"
         if (activeCall == null && !reminderUiActive) {
             showIdle()
@@ -885,6 +893,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             status.setTextColor(0xFFDF3B3B.toInt())
         }
         content.addView(ui.reminderCard(nextReminder), ui.matchWrap())
+        content.addView(ui.todayTasksCard(todayTasks), ui.matchWrap())
         val playAction = ui.homeActionCard(
             title = "播放提醒",
             subtitle = nextReminder?.let { "播放下一個提醒" } ?: "目前沒有提醒",
@@ -1652,6 +1661,15 @@ data class ReminderState(
     val audioCacheStatus: String = "not_required",
 )
 
+data class TaskState(
+    val id: String,
+    val title: String,
+    val notes: String,
+    val taskDate: String,
+    val timeText: String,
+    val completed: Boolean,
+)
+
 private data class QueuedNotification(
     val reminder: ReminderState,
     val reportToBackend: Boolean,
@@ -1670,7 +1688,12 @@ data class CallState(
 )
 
 interface SignalingListener {
-    fun onHelloAck(deviceName: String, settings: JSONObject?, next: JSONObject?)
+    fun onHelloAck(
+        deviceName: String,
+        settings: JSONObject?,
+        next: JSONObject?,
+        tasks: List<TaskState>,
+    )
     fun onConfigUpdated(settings: JSONObject?)
     fun onRemindersUpdated(next: ReminderState?)
     fun onRemindersSynced(
@@ -2321,6 +2344,7 @@ private class SignalingClient(
                 message.optString("device_name"),
                 message.optJSONObject("settings"),
                 message.optJSONObject("next_reminder"),
+                parseTaskStates(message.optJSONArray("today_tasks")),
             )
             "config_updated" -> listener.onConfigUpdated(message.optJSONObject("settings"))
             "reminders_updated" -> listener.onRemindersUpdated(
@@ -3168,6 +3192,29 @@ private fun parseReminderDefinitions(array: JSONArray?): List<ReminderDefinition
     return reminders
 }
 
+private fun parseTaskStates(array: JSONArray?): List<TaskState> {
+    if (array == null) return emptyList()
+    val tasks = mutableListOf<TaskState>()
+    for (index in 0 until array.length()) {
+        val item = array.optJSONObject(index) ?: continue
+        val id = item.optString("id")
+        val title = item.optString("title")
+        val taskDate = item.optString("task_date")
+        if (id.isBlank() || title.isBlank() || taskDate.isBlank()) {
+            continue
+        }
+        tasks += TaskState(
+            id = id,
+            title = title,
+            notes = item.optString("notes"),
+            taskDate = taskDate,
+            timeText = formatTaskTime(item.optNullableString("remind_at")),
+            completed = !item.optNullableString("completed_at").isNullOrBlank(),
+        )
+    }
+    return tasks
+}
+
 private fun JSONObject.optNullableString(name: String): String? {
     if (!has(name) || isNull(name)) return null
     val value = optString(name).trim()
@@ -3190,6 +3237,16 @@ fun formatReminderTime(value: String): String =
     } catch (error: Exception) {
         value.ifBlank { "下一次" }
     }
+
+private fun formatTaskTime(value: String?): String {
+    if (value.isNullOrBlank()) return "今天"
+    return try {
+        val parsed = OffsetDateTime.parse(value)
+        "%02d:%02d".format(parsed.hour, parsed.minute)
+    } catch (error: Exception) {
+        value
+    }
+}
 
 private fun pairingErrorMessage(error: Throwable): String =
     when (error.message) {
