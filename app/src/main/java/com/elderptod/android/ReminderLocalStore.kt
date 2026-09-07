@@ -16,9 +16,13 @@ data class ReminderDefinition(
     val enabled: Boolean,
     val updatedAt: String,
     val audioType: String = "tts",
+    val audioAssetId: String? = null,
     val audioUrl: String? = null,
     val audioContentType: String? = null,
     val audioFilename: String? = null,
+    val audioSize: Long? = null,
+    val audioChecksum: String? = null,
+    val audioUpdatedAt: String? = null,
 )
 
 data class ReminderAlarmItem(
@@ -40,9 +44,15 @@ class ReminderLocalStore(context: Context) :
                 repeat_rule TEXT NOT NULL,
                 enabled INTEGER NOT NULL,
                 audio_type TEXT NOT NULL DEFAULT 'tts',
+                audio_asset_id TEXT,
                 audio_url TEXT,
                 audio_content_type TEXT,
                 audio_filename TEXT,
+                audio_size INTEGER,
+                audio_checksum TEXT,
+                audio_updated_at TEXT,
+                audio_local_path TEXT,
+                audio_cache_status TEXT NOT NULL DEFAULT 'not_required',
                 updated_at TEXT NOT NULL,
                 sync_version INTEGER NOT NULL,
                 server_time TEXT,
@@ -98,6 +108,19 @@ class ReminderLocalStore(context: Context) :
             addColumnIfMissing(db, "reminder_definitions", "audio_url", "TEXT")
             addColumnIfMissing(db, "reminder_definitions", "audio_content_type", "TEXT")
             addColumnIfMissing(db, "reminder_definitions", "audio_filename", "TEXT")
+        }
+        if (oldVersion < 3) {
+            addColumnIfMissing(db, "reminder_definitions", "audio_asset_id", "TEXT")
+            addColumnIfMissing(db, "reminder_definitions", "audio_size", "INTEGER")
+            addColumnIfMissing(db, "reminder_definitions", "audio_checksum", "TEXT")
+            addColumnIfMissing(db, "reminder_definitions", "audio_updated_at", "TEXT")
+            addColumnIfMissing(db, "reminder_definitions", "audio_local_path", "TEXT")
+            addColumnIfMissing(
+                db,
+                "reminder_definitions",
+                "audio_cache_status",
+                "TEXT NOT NULL DEFAULT 'not_required'",
+            )
         }
     }
 
@@ -177,6 +200,8 @@ class ReminderLocalStore(context: Context) :
                 """
                 SELECT d.id, d.title, d.message, d.scheduled_at,
                        d.audio_type, d.audio_url, d.audio_content_type, d.audio_filename,
+                       d.audio_asset_id, d.audio_size, d.audio_checksum,
+                       d.audio_updated_at, d.audio_local_path, d.audio_cache_status,
                        s.state, s.updated_at
                 FROM reminder_definitions d
                 LEFT JOIN reminder_execution_state s ON s.reminder_id = d.id
@@ -187,8 +212,8 @@ class ReminderLocalStore(context: Context) :
             )
             cursor.use {
                 if (!it.moveToFirst()) return null
-                val state = it.getString(8)
-                val stateUpdatedAt = it.getString(9)
+                val state = it.getString(14)
+                val stateUpdatedAt = it.getString(15)
                 if (isTerminalForOccurrence(state, it.getString(3), stateUpdatedAt)) {
                     return null
                 }
@@ -201,6 +226,12 @@ class ReminderLocalStore(context: Context) :
                     audioUrl = it.getNullableString(5),
                     audioContentType = it.getNullableString(6),
                     audioFilename = it.getNullableString(7),
+                    audioAssetId = it.getNullableString(8),
+                    audioSize = it.getNullableLong(9),
+                    audioChecksum = it.getNullableString(10),
+                    audioUpdatedAt = it.getNullableString(11),
+                    audioLocalPath = it.getNullableString(12),
+                    audioCacheStatus = it.getNullableString(13) ?: "not_required",
                 )
             }
         }
@@ -240,6 +271,23 @@ class ReminderLocalStore(context: Context) :
         }
     }
 
+    fun updateAudioCacheState(
+        reminderId: String,
+        audioLocalPath: String?,
+        audioChecksum: String?,
+        audioCacheStatus: String,
+    ) {
+        val values = ContentValues().apply {
+            put("audio_local_path", audioLocalPath)
+            put("audio_checksum", audioChecksum)
+            put("audio_cache_status", audioCacheStatus)
+            put("locally_updated_at", OffsetDateTime.now().toString())
+        }
+        writableDatabase.use { db ->
+            db.update("reminder_definitions", values, "id = ?", arrayOf(reminderId))
+        }
+    }
+
     private fun upsertDefinition(
         db: SQLiteDatabase,
         deviceId: String,
@@ -247,6 +295,7 @@ class ReminderLocalStore(context: Context) :
         serverTime: String?,
         reminder: ReminderDefinition,
     ) {
+        val audioCache = nextAudioCacheState(db, reminder)
         val values = ContentValues().apply {
             put("id", reminder.id)
             put("device_id", deviceId)
@@ -256,9 +305,15 @@ class ReminderLocalStore(context: Context) :
             put("repeat_rule", reminder.repeatRule)
             put("enabled", if (reminder.enabled) 1 else 0)
             put("audio_type", reminder.audioType)
+            put("audio_asset_id", reminder.audioAssetId)
             put("audio_url", reminder.audioUrl)
             put("audio_content_type", reminder.audioContentType)
             put("audio_filename", reminder.audioFilename)
+            put("audio_size", reminder.audioSize)
+            put("audio_checksum", reminder.audioChecksum)
+            put("audio_updated_at", reminder.audioUpdatedAt)
+            put("audio_local_path", audioCache.localPath)
+            put("audio_cache_status", audioCache.status)
             put("updated_at", reminder.updatedAt)
             put("sync_version", syncVersion)
             put("server_time", serverTime)
@@ -288,6 +343,40 @@ class ReminderLocalStore(context: Context) :
             val currentScheduledAt = it.getString(0)
             val currentEnabled = it.getInt(1) == 1
             return currentScheduledAt != reminder.scheduledAt || currentEnabled != reminder.enabled
+        }
+    }
+
+    private fun nextAudioCacheState(
+        db: SQLiteDatabase,
+        reminder: ReminderDefinition,
+    ): AudioCacheState {
+        val hasAudio = reminder.audioType != "tts" &&
+            (!reminder.audioAssetId.isNullOrBlank() || !reminder.audioUrl.isNullOrBlank())
+        if (!hasAudio) {
+            return AudioCacheState(localPath = null, status = "not_required")
+        }
+        val cursor = db.query(
+            "reminder_definitions",
+            arrayOf("audio_asset_id", "audio_checksum", "audio_local_path", "audio_cache_status"),
+            "id = ?",
+            arrayOf(reminder.id),
+            null,
+            null,
+            null,
+            "1",
+        )
+        cursor.use {
+            if (!it.moveToFirst()) {
+                return AudioCacheState(localPath = null, status = "pending")
+            }
+            val sameAsset = it.getNullableString(0) == reminder.audioAssetId
+            val sameChecksum = it.getNullableString(1) == reminder.audioChecksum
+            val localPath = it.getNullableString(2)
+            val status = it.getNullableString(3)
+            if (sameAsset && sameChecksum && status == "ready" && !localPath.isNullOrBlank()) {
+                return AudioCacheState(localPath = localPath, status = "ready")
+            }
+            return AudioCacheState(localPath = null, status = "pending")
         }
     }
 
@@ -372,6 +461,8 @@ class ReminderLocalStore(context: Context) :
             """
             SELECT d.id, d.title, d.message, d.scheduled_at,
                    d.audio_type, d.audio_url, d.audio_content_type, d.audio_filename,
+                   d.audio_asset_id, d.audio_size, d.audio_checksum,
+                   d.audio_updated_at, d.audio_local_path, d.audio_cache_status,
                    s.state, s.updated_at
             FROM reminder_definitions d
             LEFT JOIN reminder_execution_state s ON s.reminder_id = d.id
@@ -398,11 +489,17 @@ class ReminderLocalStore(context: Context) :
                     audioUrl = it.getNullableString(5),
                     audioContentType = it.getNullableString(6),
                     audioFilename = it.getNullableString(7),
+                    audioAssetId = it.getNullableString(8),
+                    audioSize = it.getNullableLong(9),
+                    audioChecksum = it.getNullableString(10),
+                    audioUpdatedAt = it.getNullableString(11),
+                    audioLocalPath = it.getNullableString(12),
+                    audioCacheStatus = it.getNullableString(13) ?: "not_required",
                     parsed = parsed,
                     isTerminal = isTerminalForOccurrence(
-                        state = it.getString(8),
+                        state = it.getString(14),
                         scheduledAt = scheduledAt,
-                        stateUpdatedAt = it.getString(9),
+                        stateUpdatedAt = it.getString(15),
                     ),
                 )
             }
@@ -440,6 +537,12 @@ class ReminderLocalStore(context: Context) :
         val audioUrl: String?,
         val audioContentType: String?,
         val audioFilename: String?,
+        val audioAssetId: String?,
+        val audioSize: Long?,
+        val audioChecksum: String?,
+        val audioUpdatedAt: String?,
+        val audioLocalPath: String?,
+        val audioCacheStatus: String,
         val parsed: OffsetDateTime,
         val isTerminal: Boolean,
     ) {
@@ -453,12 +556,23 @@ class ReminderLocalStore(context: Context) :
                 audioUrl = audioUrl,
                 audioContentType = audioContentType,
                 audioFilename = audioFilename,
+                audioAssetId = audioAssetId,
+                audioSize = audioSize,
+                audioChecksum = audioChecksum,
+                audioUpdatedAt = audioUpdatedAt,
+                audioLocalPath = audioLocalPath,
+                audioCacheStatus = audioCacheStatus,
             )
     }
 
+    private data class AudioCacheState(
+        val localPath: String?,
+        val status: String,
+    )
+
     companion object {
         private const val DATABASE_NAME = "elderptod_reminders.sqlite3"
-        private const val DATABASE_VERSION = 2
+        private const val DATABASE_VERSION = 3
     }
 }
 
@@ -479,3 +593,6 @@ private fun addColumnIfMissing(
 
 private fun Cursor.getNullableString(index: Int): String? =
     if (isNull(index)) null else getString(index)
+
+private fun Cursor.getNullableLong(index: Int): Long? =
+    if (isNull(index)) null else getLong(index)
