@@ -507,7 +507,12 @@ class ElderUi(
             setPadding(dp(8), dp(14), dp(8), dp(8))
             addView(
                 centeredText(48f, ElderColors.PRIMARY).apply {
-                    text = if (reminder.kind == "task") "做" else "鈴"
+                    text = when (reminder.kind) {
+                        "task" -> "做"
+                        "announcement" -> "告"
+                        "emergency" -> "急"
+                        else -> "鈴"
+                    }
                     typeface = Typeface.DEFAULT_BOLD
                     includeFontPadding = false
                     background = rounded(ElderColors.PRIMARY_SOFT, dp(999).toFloat())
@@ -516,6 +521,29 @@ class ElderUi(
                     bottomMargin = dp(18)
                 },
             )
+            if (
+                (reminder.kind == "announcement" || reminder.kind == "emergency") &&
+                !reminder.sourceName.isNullOrBlank()
+            ) {
+                addView(
+                    TextView(context).apply {
+                        text = reminder.sourceName
+                        textSize = sp(24f)
+                        typeface = Typeface.DEFAULT_BOLD
+                        gravity = Gravity.CENTER
+                        maxLines = 2
+                        setTextColor(ElderColors.TEXT_SECONDARY)
+                        setPadding(dp(4), 0, dp(4), dp(8))
+                        setAutoSizeTextTypeUniformWithConfiguration(
+                            spInt(18),
+                            spInt(24),
+                            1,
+                            TypedValue.COMPLEX_UNIT_SP,
+                        )
+                    },
+                    innerWrap(),
+                )
+            }
             addView(
                 TextView(context).apply {
                     text = reminder.title
@@ -537,7 +565,12 @@ class ElderUi(
             addView(
                 TextView(context).apply {
                     text = reminder.message.ifBlank {
-                        if (reminder.kind == "task") "正在播放今日任務" else "正在播放錄音提醒"
+                        when (reminder.kind) {
+                            "task" -> "正在播放今日任務"
+                            "announcement" -> "正在播放公告"
+                            "emergency" -> "正在播放緊急通知"
+                            else -> "正在播放錄音提醒"
+                        }
                     }
                     textSize = sp(ElderType.MESSAGE)
                     gravity = Gravity.CENTER

@@ -943,10 +943,22 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             ?: "${reminder.title}|${reminder.message}|${reminder.timeText}"
 
     private fun notificationLabel(reminder: ReminderState): String =
-        if (reminder.kind == "task") "任務" else "提醒"
+        when (reminder.kind) {
+            "task" -> "任務"
+            "announcement" -> {
+                if (reminder.priority == "urgent") "緊急公告" else "公告"
+            }
+            "emergency" -> "緊急通知"
+            else -> "提醒"
+        }
 
     private fun notificationFallbackMessage(reminder: ReminderState): String =
-        if (reminder.kind == "task") "任務時間到了" else "提醒時間到了"
+        when (reminder.kind) {
+            "task" -> "任務時間到了"
+            "announcement" -> "有新的公告"
+            "emergency" -> "有緊急通知"
+            else -> "提醒時間到了"
+        }
 
     private fun reminderAudioPlaybackUrl(audioAssetId: String?, audioUrl: String?): String {
         val path = if (!audioAssetId.isNullOrBlank()) {
@@ -1000,12 +1012,8 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         content.addView(
             ui.stateScreen(
                 symbol = "✓",
-                title = if (reminder.kind == "task") "已完成任務" else "已經通知家人",
-                detail = if (reminder.kind == "task") {
-                    "家人端會看到完成時間"
-                } else {
-                    "家人端會看到確認時間"
-                },
+                title = acknowledgedTitle(reminder),
+                detail = acknowledgedDetail(reminder),
             ),
             ui.matchWrap(),
         )
@@ -1014,6 +1022,21 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         hideActions()
         primaryButton.visibility = View.VISIBLE
     }
+
+    private fun acknowledgedTitle(reminder: ReminderState): String =
+        when (reminder.kind) {
+            "task" -> "已完成任務"
+            "announcement" -> "已收到公告"
+            "emergency" -> "已確認通知"
+            else -> "已經通知家人"
+        }
+
+    private fun acknowledgedDetail(reminder: ReminderState): String =
+        when (reminder.kind) {
+            "task" -> "家人端會看到完成時間"
+            "announcement", "emergency" -> "家人端會看到收到時間"
+            else -> "家人端會看到確認時間"
+        }
 
     private fun showCallPrompt(reminder: ReminderState, reportToBackend: Boolean = false) {
         homeClockActive = false
@@ -1364,6 +1387,8 @@ data class ReminderState(
     val message: String,
     val timeText: String,
     val kind: String = "reminder",
+    val priority: String = "normal",
+    val sourceName: String? = null,
     val reminderId: String? = null,
     val notificationId: String? = null,
     val audioType: String = "tts",
@@ -2060,7 +2085,14 @@ private class SignalingClient(
             "notification" -> {
                 val notification = message.optJSONObject("notification") ?: return
                 val kind = notification.optString("kind", "reminder")
-                if (kind != "reminder" && kind != "task") return
+                if (
+                    kind != "reminder" &&
+                    kind != "task" &&
+                    kind != "announcement" &&
+                    kind != "emergency"
+                ) {
+                    return
+                }
                 val audioAssetId = notification.optNullableString("audio_asset_id")
                 val audioUrl = notification.optNullableString("audio_url")
                 listener.onNotification(
@@ -2069,6 +2101,8 @@ private class SignalingClient(
                         message = notification.optString("message"),
                         timeText = "現在",
                         kind = kind,
+                        priority = notification.optString("priority", "normal"),
+                        sourceName = notification.optNullableString("source_name"),
                         reminderId = notification.optNullableString("reminder_id"),
                         notificationId = notification.optString("id"),
                         audioType = notification.optString("audio_type", "tts"),
