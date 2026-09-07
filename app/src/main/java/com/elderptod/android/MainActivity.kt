@@ -170,6 +170,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private var activeReminderReportsToBackend = false
     private var reminderPlayCount = 0
     private var nextReminder: ReminderState? = null
+    private var pendingPriorityNotification: QueuedNotification? = null
     private var callDurationText: TextView? = null
     private var remotePlaybackGainProfile = "normal"
     private var iceServers: List<PeerConnection.IceServer> =
@@ -373,8 +374,8 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         }
         nextReminder = null
         if (activeCall != null) {
-            if (isPriorityInterrupt(reminder)) {
-                interruptActiveCallForNotification(reminder)
+            if (isPriorityNotification(reminder)) {
+                queuePriorityNotificationDuringCall(reminder, reportToBackend)
             } else {
                 reminderLocalStore.markExecutionState(reminder.reminderId, "failed", "DEVICE_BUSY")
                 ReminderAlarmScheduler.scheduleNext(this, reminderLocalStore)
@@ -385,8 +386,8 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
                         "DEVICE_BUSY",
                     )
                 }
-                return
             }
+            return
         }
         reminderLocalStore.markExecutionState(reminder.reminderId, "triggered")
         reminderLocalStore.markExecutionState(reminder.reminderId, "received")
@@ -400,21 +401,61 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         playReminder(reminder, reportToBackend)
     }
 
-    private fun isPriorityInterrupt(reminder: ReminderState): Boolean =
+    private fun isPriorityNotification(reminder: ReminderState): Boolean =
         reminder.kind == "emergency" ||
             reminder.priority == "urgent" ||
             reminder.priority == "emergency"
 
-    private fun interruptActiveCallForNotification(reminder: ReminderState) {
-        val call = activeCall ?: return
+    private fun queuePriorityNotificationDuringCall(
+        reminder: ReminderState,
+        reportToBackend: Boolean,
+    ) {
+        val existing = pendingPriorityNotification
+        if (existing?.let { reminderIdentity(it.reminder) == reminderIdentity(reminder) } == true) {
+            if (reportToBackend) {
+                signalingClient.sendNotificationEvent(reminder.notificationId, "received")
+            }
+            return
+        }
+        if (existing != null) {
+            val existingRank = notificationPriorityRank(existing.reminder)
+            val incomingRank = notificationPriorityRank(reminder)
+            if (existingRank >= incomingRank) {
+                if (reportToBackend) {
+                    signalingClient.sendNotificationEvent(
+                        reminder.notificationId,
+                        "failed",
+                        "DEVICE_AUDIO_BUSY",
+                    )
+                }
+                return
+            }
+            if (existing.reportToBackend) {
+                signalingClient.sendNotificationEvent(
+                    existing.reminder.notificationId,
+                    "failed",
+                    "PREEMPTED_BY_HIGHER_PRIORITY",
+                )
+            }
+        }
         Log.i(
             LOG_TAG,
-            "priority_notification_interrupt kind=${reminder.kind} priority=${reminder.priority} " +
-                "callId=${call.id}",
+            "priority_notification_queued kind=${reminder.kind} priority=${reminder.priority} " +
+                "callId=${activeCall?.id.orEmpty()}",
         )
-        signalingClient.sendCallEvent("hangup", call.id)
-        endLocalCall("ended")
+        pendingPriorityNotification = QueuedNotification(reminder, reportToBackend)
+        reminderLocalStore.markExecutionState(reminder.reminderId, "received")
+        if (reportToBackend) {
+            signalingClient.sendNotificationEvent(reminder.notificationId, "received")
+        }
     }
+
+    private fun notificationPriorityRank(reminder: ReminderState): Int =
+        when {
+            reminder.kind == "emergency" || reminder.priority == "emergency" -> 3
+            reminder.priority == "urgent" -> 2
+            else -> 1
+        }
 
     override fun onCallUpdated(call: CallState) {
         Log.i(LOG_TAG, "call_updated callId=${call.id} status=${call.status}")
@@ -1217,6 +1258,16 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         audioController.stopCallAudio()
         webrtc.stop()
         activeCall = null
+        pendingPriorityNotification?.let {
+            pendingPriorityNotification = null
+            Log.i(
+                LOG_TAG,
+                "priority_notification_play_after_call kind=${it.reminder.kind} " +
+                    "priority=${it.reminder.priority}",
+            )
+            playReminder(it.reminder, it.reportToBackend)
+            return
+        }
         showCallResult(callerName, result)
     }
 
@@ -1421,6 +1472,11 @@ data class ReminderState(
     val audioUpdatedAt: String? = null,
     val audioLocalPath: String? = null,
     val audioCacheStatus: String = "not_required",
+)
+
+private data class QueuedNotification(
+    val reminder: ReminderState,
+    val reportToBackend: Boolean,
 )
 
 private data class PairingQr(
