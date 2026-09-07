@@ -439,6 +439,68 @@ class ElderUi(
             style = ElderPanelStyle.SOFT,
         )
 
+    fun todayTasksCard(tasks: List<TaskState>): LinearLayout =
+        LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.START
+            minimumHeight = dp(118)
+            setPadding(dp(18), dp(14), dp(18), dp(14))
+            background = bordered(ElderColors.CARD, dp(16).toFloat())
+            addView(
+                labelBadge("今日任務", ElderPanelStyle.NORMAL),
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    bottomMargin = dp(8)
+                },
+            )
+            if (tasks.isEmpty()) {
+                addView(
+                    TextView(context).apply {
+                        text = "無"
+                        textSize = sp(ElderType.CARD_TITLE, 34f)
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextColor(ElderColors.TEXT_PRIMARY)
+                    },
+                    innerWrap(),
+                )
+                return@apply
+            }
+            tasks.take(TODAY_TASK_DISPLAY_LIMIT).forEach { task ->
+                addView(
+                    TextView(context).apply {
+                        text = "${if (task.completed) "✓" else "•"} ${task.timeText} ${task.title}"
+                        textSize = sp(24f)
+                        typeface = if (task.completed) Typeface.DEFAULT else Typeface.DEFAULT_BOLD
+                        maxLines = 2
+                        setTextColor(
+                            if (task.completed) ElderColors.TEXT_MUTED else ElderColors.TEXT_PRIMARY,
+                        )
+                        setPadding(0, dp(4), 0, 0)
+                        setAutoSizeTextTypeUniformWithConfiguration(
+                            spInt(18),
+                            spInt(24),
+                            1,
+                            TypedValue.COMPLEX_UNIT_SP,
+                        )
+                    },
+                    innerWrap(),
+                )
+            }
+            if (tasks.size > TODAY_TASK_DISPLAY_LIMIT) {
+                addView(
+                    TextView(context).apply {
+                        text = "還有 ${tasks.size - TODAY_TASK_DISPLAY_LIMIT} 項"
+                        textSize = sp(18f)
+                        setTextColor(ElderColors.TEXT_MUTED)
+                        setPadding(0, dp(6), 0, 0)
+                    },
+                    innerWrap(),
+                )
+            }
+        }
+
     fun stateScreen(
         symbol: String,
         title: String,
