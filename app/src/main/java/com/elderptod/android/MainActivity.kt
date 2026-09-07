@@ -170,6 +170,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private var activeReminderReportsToBackend = false
     private var reminderPlayCount = 0
     private var nextReminder: ReminderState? = null
+    private var activeSpokenNotification: QueuedNotification? = null
     private var pendingPriorityNotification: QueuedNotification? = null
     private var callDurationText: TextView? = null
     private var remotePlaybackGainProfile = "normal"
@@ -372,6 +373,14 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             }
             return
         }
+        if (reminderUiActive && activeSpokenNotification != null) {
+            if (shouldPreemptActiveSpokenNotification(reminder)) {
+                preemptActiveSpokenNotification()
+            } else {
+                failNotificationDueToAudioBusy(reminder, reportToBackend)
+                return
+            }
+        }
         nextReminder = null
         if (activeCall != null) {
             if (isPriorityNotification(reminder)) {
@@ -399,6 +408,52 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             signalingClient.sendNotificationEvent(reminder.notificationId, "received")
         }
         playReminder(reminder, reportToBackend)
+    }
+
+    private fun shouldPreemptActiveSpokenNotification(reminder: ReminderState): Boolean {
+        val active = activeSpokenNotification ?: return true
+        return notificationPriorityRank(reminder) > notificationPriorityRank(active.reminder)
+    }
+
+    private fun preemptActiveSpokenNotification() {
+        val active = activeSpokenNotification ?: return
+        Log.i(
+            LOG_TAG,
+            "spoken_notification_preempted kind=${active.reminder.kind} " +
+                "priority=${active.reminder.priority}",
+        )
+        reminderLocalStore.markExecutionState(
+            active.reminder.reminderId,
+            "failed",
+            "PREEMPTED_BY_HIGHER_PRIORITY",
+        )
+        if (active.reportToBackend) {
+            signalingClient.sendNotificationEvent(
+                active.reminder.notificationId,
+                "failed",
+                "PREEMPTED_BY_HIGHER_PRIORITY",
+            )
+        }
+        cancelReminderReplay(stopAudio = true)
+    }
+
+    private fun failNotificationDueToAudioBusy(
+        reminder: ReminderState,
+        reportToBackend: Boolean,
+    ) {
+        Log.i(
+            LOG_TAG,
+            "notification_audio_busy kind=${reminder.kind} priority=${reminder.priority}",
+        )
+        reminderLocalStore.markExecutionState(reminder.reminderId, "failed", "DEVICE_AUDIO_BUSY")
+        ReminderAlarmScheduler.scheduleNext(this, reminderLocalStore)
+        if (reportToBackend) {
+            signalingClient.sendNotificationEvent(
+                reminder.notificationId,
+                "failed",
+                "DEVICE_AUDIO_BUSY",
+            )
+        }
     }
 
     private fun isPriorityNotification(reminder: ReminderState): Boolean =
@@ -749,6 +804,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         reminderReplayRunnable = null
         activeReminderKey = null
         activeReminderReportsToBackend = false
+        activeSpokenNotification = null
         reminderPlayCount = 0
         if (stopAudio) {
             reminderTts.stop()
@@ -945,6 +1001,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         val key = reminderIdentity(reminder)
         activeReminderKey = key
         activeReminderReportsToBackend = reportToBackend
+        activeSpokenNotification = QueuedNotification(reminder, reportToBackend)
         reminderPlayCount = 0
         playReminderAttempt(reminder, key)
     }
@@ -988,6 +1045,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         if (activeReminderKey != key || !reminderUiActive) return
         if (reminderPlayCount >= REMINDER_MAX_PLAY_COUNT) {
             reminderLocalStore.markExecutionState(reminder.reminderId, "expired")
+            activeSpokenNotification = null
             if (activeReminderReportsToBackend) {
                 signalingClient.sendNotificationEvent(reminder.notificationId, "expired")
             }
