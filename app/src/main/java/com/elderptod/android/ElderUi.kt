@@ -505,8 +505,18 @@ class ElderUi(
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(dp(8), dp(14), dp(8), dp(8))
+            if (isPriorityNotification(reminder)) {
+                background = rounded(ElderColors.DANGER_SOFT, dp(24).toFloat())
+            }
             addView(
-                centeredText(48f, ElderColors.PRIMARY).apply {
+                centeredText(
+                    48f,
+                    if (isPriorityNotification(reminder)) {
+                        ElderColors.ON_PRIMARY
+                    } else {
+                        ElderColors.PRIMARY
+                    },
+                ).apply {
                     text = when (reminder.kind) {
                         "task" -> "做"
                         "announcement" -> "告"
@@ -515,7 +525,14 @@ class ElderUi(
                     }
                     typeface = Typeface.DEFAULT_BOLD
                     includeFontPadding = false
-                    background = rounded(ElderColors.PRIMARY_SOFT, dp(999).toFloat())
+                    background = rounded(
+                        if (isPriorityNotification(reminder)) {
+                            ElderColors.DANGER
+                        } else {
+                            ElderColors.PRIMARY_SOFT
+                        },
+                        dp(999).toFloat(),
+                    )
                 },
                 LinearLayout.LayoutParams(dp(104), dp(104)).apply {
                     bottomMargin = dp(18)
@@ -532,7 +549,13 @@ class ElderUi(
                         typeface = Typeface.DEFAULT_BOLD
                         gravity = Gravity.CENTER
                         maxLines = 2
-                        setTextColor(ElderColors.TEXT_SECONDARY)
+                        setTextColor(
+                            if (isPriorityNotification(reminder)) {
+                                ElderColors.DANGER
+                            } else {
+                                ElderColors.TEXT_SECONDARY
+                            },
+                        )
                         setPadding(dp(4), 0, dp(4), dp(8))
                         setAutoSizeTextTypeUniformWithConfiguration(
                             spInt(18),
@@ -552,7 +575,13 @@ class ElderUi(
                     gravity = Gravity.CENTER
                     maxLines = 3
                     includeFontPadding = false
-                    setTextColor(ElderColors.TEXT_PRIMARY)
+                    setTextColor(
+                        if (isPriorityNotification(reminder)) {
+                            ElderColors.DANGER
+                        } else {
+                            ElderColors.TEXT_PRIMARY
+                        },
+                    )
                     setAutoSizeTextTypeUniformWithConfiguration(
                         spInt(22),
                         spInt(34),
@@ -736,20 +765,26 @@ class ElderUi(
         return ElderFontSizeControl(row, standard, large, extraLarge)
     }
 
-    fun audioStatusRow(text: String): LinearLayout =
+    fun audioStatusRow(text: String, warning: Boolean = false): LinearLayout =
         LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             minimumHeight = dp(80)
             setPadding(dp(16), dp(10), dp(16), dp(10))
-            background = rounded(ElderColors.CARD, dp(16).toFloat())
+            background = rounded(
+                if (warning) ElderColors.DANGER_SOFT else ElderColors.CARD,
+                dp(16).toFloat(),
+            )
             addView(
-                centeredText(20f, ElderColors.PRIMARY).apply {
+                centeredText(20f, if (warning) ElderColors.DANGER else ElderColors.PRIMARY).apply {
                     this.text = "聲"
                     typeface = Typeface.DEFAULT_BOLD
                     minWidth = dp(44)
                     minHeight = dp(44)
-                    background = rounded(ElderColors.PRIMARY_SOFT, dp(999).toFloat())
+                    background = rounded(
+                        if (warning) ElderColors.CARD else ElderColors.PRIMARY_SOFT,
+                        dp(999).toFloat(),
+                    )
                 },
                 LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -762,7 +797,7 @@ class ElderUi(
                 TextView(context).apply {
                     this.text = text
                     textSize = sp(22f)
-                    setTextColor(ElderColors.TEXT_MUTED)
+                    setTextColor(if (warning) ElderColors.DANGER else ElderColors.TEXT_MUTED)
                 },
                 LinearLayout.LayoutParams(
                     0,
@@ -771,6 +806,11 @@ class ElderUi(
                 ),
             )
         }
+
+    private fun isPriorityNotification(reminder: ReminderState): Boolean =
+        reminder.kind == "emergency" ||
+            reminder.priority == "urgent" ||
+            reminder.priority == "emergency"
 
     fun applyStatusPill(
         view: TextView,

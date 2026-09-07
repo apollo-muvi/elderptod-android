@@ -1011,7 +1011,16 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         reminderUiActive = true
         clearDynamicInputs()
         clearContent()
-        showHeader("ElderPTOD", "● 正在播放", showBack = true)
+        showHeader(
+            "ElderPTOD",
+            notificationHeader(reminder),
+            showBack = true,
+            statusStyle = if (isPriorityNotification(reminder)) {
+                ElderStatusStyle.WARNING
+            } else {
+                ElderStatusStyle.NORMAL
+            },
+        )
         hideTextStack()
         content.addView(
             ui.reminderScreen(reminder),
@@ -1027,6 +1036,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
                 } else {
                     "正在播放錄音${notificationLabel(reminder)}"
                 },
+                warning = isPriorityNotification(reminder),
             ),
             ui.matchWrap(),
         )
@@ -1172,6 +1182,13 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             }
             "emergency" -> "緊急通知"
             else -> "提醒"
+        }
+
+    private fun notificationHeader(reminder: ReminderState): String =
+        when {
+            reminder.kind == "emergency" || reminder.priority == "emergency" -> "⚠ 重要通知"
+            reminder.priority == "urgent" -> "⚠ 緊急公告"
+            else -> "● 正在播放"
         }
 
     private fun notificationFallbackMessage(reminder: ReminderState): String =
