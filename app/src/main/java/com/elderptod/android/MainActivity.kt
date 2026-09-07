@@ -171,6 +171,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private var reminderPlayCount = 0
     private var nextReminder: ReminderState? = null
     private var activeSpokenNotification: QueuedNotification? = null
+    private var pendingSpokenNotification: QueuedNotification? = null
     private var pendingPriorityNotification: QueuedNotification? = null
     private var callDurationText: TextView? = null
     private var remotePlaybackGainProfile = "normal"
@@ -377,7 +378,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             if (shouldPreemptActiveSpokenNotification(reminder)) {
                 preemptActiveSpokenNotification()
             } else {
-                failNotificationDueToAudioBusy(reminder, reportToBackend)
+                queueSpokenNotification(reminder, reportToBackend)
                 return
             }
         }
@@ -437,21 +438,58 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         cancelReminderReplay(stopAudio = true)
     }
 
-    private fun failNotificationDueToAudioBusy(
+    private fun queueSpokenNotification(
         reminder: ReminderState,
         reportToBackend: Boolean,
     ) {
+        val existing = pendingSpokenNotification
+        if (existing?.let { reminderIdentity(it.reminder) == reminderIdentity(reminder) } == true) {
+            if (reportToBackend) {
+                signalingClient.sendNotificationEvent(reminder.notificationId, "received")
+            }
+            return
+        }
+        if (existing != null) {
+            val existingRank = notificationPriorityRank(existing.reminder)
+            val incomingRank = notificationPriorityRank(reminder)
+            if (existingRank >= incomingRank) {
+                failNotificationDueToAudioBusy(reminder, reportToBackend)
+                return
+            }
+            failNotificationDueToAudioBusy(
+                existing.reminder,
+                existing.reportToBackend,
+                "PREEMPTED_BY_HIGHER_PRIORITY",
+            )
+        }
         Log.i(
             LOG_TAG,
-            "notification_audio_busy kind=${reminder.kind} priority=${reminder.priority}",
+            "spoken_notification_queued kind=${reminder.kind} priority=${reminder.priority}",
         )
-        reminderLocalStore.markExecutionState(reminder.reminderId, "failed", "DEVICE_AUDIO_BUSY")
+        pendingSpokenNotification = QueuedNotification(reminder, reportToBackend)
+        reminderLocalStore.markExecutionState(reminder.reminderId, "received")
+        ReminderAlarmScheduler.scheduleNext(this, reminderLocalStore)
+        if (reportToBackend) {
+            signalingClient.sendNotificationEvent(reminder.notificationId, "received")
+        }
+    }
+
+    private fun failNotificationDueToAudioBusy(
+        reminder: ReminderState,
+        reportToBackend: Boolean,
+        error: String = "DEVICE_AUDIO_BUSY",
+    ) {
+        Log.i(
+            LOG_TAG,
+            "notification_audio_busy kind=${reminder.kind} priority=${reminder.priority} error=$error",
+        )
+        reminderLocalStore.markExecutionState(reminder.reminderId, "failed", error)
         ReminderAlarmScheduler.scheduleNext(this, reminderLocalStore)
         if (reportToBackend) {
             signalingClient.sendNotificationEvent(
                 reminder.notificationId,
                 "failed",
-                "DEVICE_AUDIO_BUSY",
+                error,
             )
         }
     }
@@ -813,6 +851,10 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     }
 
     private fun showIdle() {
+        if (activeCall == null && pendingSpokenNotification != null) {
+            playPendingSpokenNotificationIfReady()
+            return
+        }
         homeClockActive = true
         reminderUiActive = false
         cancelReminderReplay(stopAudio = true)
@@ -1050,10 +1092,23 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
                 signalingClient.sendNotificationEvent(reminder.notificationId, "expired")
             }
             ReminderAlarmScheduler.dismissReminderNotification(this)
+            playPendingSpokenNotificationIfReady()
             return
         }
         reminderReplayRunnable = Runnable { playReminderAttempt(reminder, key) }
         mainHandler.postDelayed(reminderReplayRunnable!!, REMINDER_REPLAY_DELAY_MS)
+    }
+
+    private fun playPendingSpokenNotificationIfReady() {
+        if (activeCall != null || activeSpokenNotification != null) return
+        val queued = pendingSpokenNotification ?: return
+        pendingSpokenNotification = null
+        Log.i(
+            LOG_TAG,
+            "spoken_notification_play_queued kind=${queued.reminder.kind} " +
+                "priority=${queued.reminder.priority}",
+        )
+        playReminder(queued.reminder, queued.reportToBackend)
     }
 
     private fun reminderIdentity(reminder: ReminderState): String =
