@@ -92,6 +92,8 @@ private const val PAIRING_SUCCESS_AUTO_START_DELAY_MS = 2_000L
 private const val CALL_RESULT_AUTO_HOME_DELAY_MS = 6_000L
 private const val REMINDER_REPLAY_DELAY_MS = 25_000L
 private const val REMINDER_MAX_PLAY_COUNT = 3
+private const val PRIORITY_ALERT_TONE_MS = 650L
+private const val PRIORITY_ALERT_SPEECH_DELAY_MS = 800L
 const val LOG_TAG = "ElderPTOD"
 class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -173,6 +175,8 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private var activeSpokenNotification: QueuedNotification? = null
     private var pendingSpokenNotification: QueuedNotification? = null
     private var pendingPriorityNotification: QueuedNotification? = null
+    private var priorityAlertToneGenerator: ToneGenerator? = null
+    private var priorityAlertSpeechRunnable: Runnable? = null
     private var callDurationText: TextView? = null
     private var remotePlaybackGainProfile = "normal"
     private var iceServers: List<PeerConnection.IceServer> =
@@ -844,10 +848,18 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         activeReminderReportsToBackend = false
         activeSpokenNotification = null
         reminderPlayCount = 0
+        cancelPriorityAlertTone()
         if (stopAudio) {
             reminderTts.stop()
             reminderAudioPlayer.stop()
         }
+    }
+
+    private fun cancelPriorityAlertTone() {
+        priorityAlertSpeechRunnable?.let { mainHandler.removeCallbacks(it) }
+        priorityAlertSpeechRunnable = null
+        priorityAlertToneGenerator?.release()
+        priorityAlertToneGenerator = null
     }
 
     private fun showIdle() {
@@ -1058,6 +1070,17 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     }
 
     private fun playReminderAudioOrTts(reminder: ReminderState, key: String) {
+        if (isPriorityNotification(reminder)) {
+            playPriorityAlertToneThen(reminder, key) {
+                playReminderAudioOrTtsAfterTone(reminder, key)
+            }
+            return
+        }
+        playReminderAudioOrTtsAfterTone(reminder, key)
+    }
+
+    private fun playReminderAudioOrTtsAfterTone(reminder: ReminderState, key: String) {
+        if (activeReminderKey != key || !reminderUiActive) return
         if (
             reminder.audioType != "tts" &&
             (!reminder.audioAssetId.isNullOrBlank() || !reminder.audioUrl.isNullOrBlank())
@@ -1081,6 +1104,31 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         reminderTts.speak(reminder.message.ifBlank { notificationFallbackMessage(reminder) }) {
             onReminderSpeechDone(reminder, key)
         }
+    }
+
+    private fun playPriorityAlertToneThen(
+        reminder: ReminderState,
+        key: String,
+        afterTone: () -> Unit,
+    ) {
+        cancelPriorityAlertTone()
+        if (activeReminderKey != key || !reminderUiActive) return
+        Log.i(
+            LOG_TAG,
+            "priority_alert_tone kind=${reminder.kind} priority=${reminder.priority}",
+        )
+        priorityAlertToneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 100).also {
+            it.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, PRIORITY_ALERT_TONE_MS.toInt())
+        }
+        priorityAlertSpeechRunnable = Runnable {
+            priorityAlertSpeechRunnable = null
+            priorityAlertToneGenerator?.release()
+            priorityAlertToneGenerator = null
+            if (activeReminderKey == key && reminderUiActive) {
+                afterTone()
+            }
+        }
+        mainHandler.postDelayed(priorityAlertSpeechRunnable!!, PRIORITY_ALERT_SPEECH_DELAY_MS)
     }
 
     private fun onReminderSpeechDone(reminder: ReminderState, key: String) {
