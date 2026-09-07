@@ -1197,7 +1197,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             "announcement" -> {
                 if (reminder.priority == "urgent") "緊急公告" else "公告"
             }
-            "emergency" -> "緊急通知"
+            "emergency" -> "重要通知"
             else -> "提醒"
         }
 
@@ -1212,7 +1212,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         when (reminder.kind) {
             "task" -> "任務時間到了"
             "announcement" -> "有新的公告"
-            "emergency" -> "有緊急通知"
+            "emergency" -> "有重要通知"
             else -> "提醒時間到了"
         }
 
@@ -1283,14 +1283,15 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         when (reminder.kind) {
             "task" -> "已完成任務"
             "announcement" -> "已收到公告"
-            "emergency" -> "已確認通知"
+            "emergency" -> "已確認重要通知"
             else -> "已經通知家人"
         }
 
     private fun acknowledgedDetail(reminder: ReminderState): String =
         when (reminder.kind) {
             "task" -> "家人端會看到完成時間"
-            "announcement", "emergency" -> "家人端會看到收到時間"
+            "announcement" -> "家人端會看到收到時間"
+            "emergency" -> "家人端會看到收到時間；系統不會自動撥打 119"
             else -> "家人端會看到確認時間"
         }
 
