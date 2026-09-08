@@ -35,6 +35,7 @@ object ReminderAlarmContract {
     const val EXTRA_REMINDER_AUDIO_CONTENT_TYPE = "reminder_audio_content_type"
     const val EXTRA_REMINDER_AUDIO_FILENAME = "reminder_audio_filename"
     const val EXTRA_REMINDER_AUDIO_SIZE = "reminder_audio_size"
+    const val EXTRA_REMINDER_AUDIO_DURATION_MS = "reminder_audio_duration_ms"
     const val EXTRA_REMINDER_AUDIO_CHECKSUM = "reminder_audio_checksum"
     const val EXTRA_REMINDER_AUDIO_UPDATED_AT = "reminder_audio_updated_at"
     const val EXTRA_REMINDER_AUDIO_LOCAL_PATH = "reminder_audio_local_path"
@@ -220,6 +221,9 @@ object ReminderAlarmScheduler {
             putExtra(ReminderAlarmContract.EXTRA_REMINDER_AUDIO_FILENAME, reminder.audioFilename)
             reminder.audioSize?.let {
                 putExtra(ReminderAlarmContract.EXTRA_REMINDER_AUDIO_SIZE, it)
+            }
+            reminder.audioDurationMs?.let {
+                putExtra(ReminderAlarmContract.EXTRA_REMINDER_AUDIO_DURATION_MS, it)
             }
             putExtra(ReminderAlarmContract.EXTRA_REMINDER_AUDIO_CHECKSUM, reminder.audioChecksum)
             putExtra(
