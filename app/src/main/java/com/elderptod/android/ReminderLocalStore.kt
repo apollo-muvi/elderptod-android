@@ -9,6 +9,7 @@ import java.time.OffsetDateTime
 
 data class ReminderDefinition(
     val id: String,
+    val notificationId: String? = null,
     val title: String,
     val message: String,
     val scheduledAt: String,
@@ -27,6 +28,7 @@ data class ReminderDefinition(
 
 data class ReminderAlarmItem(
     val reminderId: String,
+    val notificationId: String?,
     val scheduledAt: OffsetDateTime,
 )
 
@@ -37,6 +39,7 @@ class ReminderLocalStore(context: Context) :
             """
             CREATE TABLE reminder_definitions (
                 id TEXT PRIMARY KEY,
+                notification_id TEXT,
                 device_id TEXT NOT NULL,
                 title TEXT NOT NULL,
                 message TEXT NOT NULL,
@@ -65,7 +68,12 @@ class ReminderLocalStore(context: Context) :
             CREATE TABLE reminder_execution_state (
                 reminder_id TEXT PRIMARY KEY,
                 state TEXT NOT NULL,
+                synced_at TEXT,
+                audio_cache_pending_at TEXT,
+                audio_cache_ready_at TEXT,
+                audio_cache_failed_at TEXT,
                 scheduled_locally_at TEXT,
+                local_alarm_triggered_at TEXT,
                 triggered_at TEXT,
                 played_at TEXT,
                 acknowledged_at TEXT,
@@ -122,6 +130,14 @@ class ReminderLocalStore(context: Context) :
                 "TEXT NOT NULL DEFAULT 'not_required'",
             )
         }
+        if (oldVersion < 4) {
+            addColumnIfMissing(db, "reminder_definitions", "notification_id", "TEXT")
+            addColumnIfMissing(db, "reminder_execution_state", "synced_at", "TEXT")
+            addColumnIfMissing(db, "reminder_execution_state", "audio_cache_pending_at", "TEXT")
+            addColumnIfMissing(db, "reminder_execution_state", "audio_cache_ready_at", "TEXT")
+            addColumnIfMissing(db, "reminder_execution_state", "audio_cache_failed_at", "TEXT")
+            addColumnIfMissing(db, "reminder_execution_state", "local_alarm_triggered_at", "TEXT")
+        }
     }
 
     fun applySync(
@@ -177,6 +193,7 @@ class ReminderLocalStore(context: Context) :
             val next = nextCandidate(db, after = OffsetDateTime.now()) ?: return null
             return ReminderAlarmItem(
                 reminderId = next.reminderId,
+                notificationId = next.notificationId,
                 scheduledAt = next.parsed,
             )
         }
@@ -198,7 +215,7 @@ class ReminderLocalStore(context: Context) :
         readableDatabase.use { db ->
             val cursor = db.rawQuery(
                 """
-                SELECT d.id, d.title, d.message, d.scheduled_at,
+                SELECT d.id, d.notification_id, d.title, d.message, d.scheduled_at,
                        d.audio_type, d.audio_url, d.audio_content_type, d.audio_filename,
                        d.audio_asset_id, d.audio_size, d.audio_checksum,
                        d.audio_updated_at, d.audio_local_path, d.audio_cache_status,
@@ -212,26 +229,27 @@ class ReminderLocalStore(context: Context) :
             )
             cursor.use {
                 if (!it.moveToFirst()) return null
-                val state = it.getString(14)
-                val stateUpdatedAt = it.getString(15)
-                if (isTerminalForOccurrence(state, it.getString(3), stateUpdatedAt)) {
+                val state = it.getString(15)
+                val stateUpdatedAt = it.getString(16)
+                if (isTerminalForOccurrence(state, it.getString(4), stateUpdatedAt)) {
                     return null
                 }
                 return ReminderState(
-                    title = it.getString(1),
-                    message = it.getString(2),
-                    timeText = formatReminderTime(it.getString(3)),
+                    title = it.getString(2),
+                    message = it.getString(3),
+                    timeText = formatReminderTime(it.getString(4)),
                     reminderId = it.getString(0),
-                    audioType = it.getString(4),
-                    audioUrl = it.getNullableString(5),
-                    audioContentType = it.getNullableString(6),
-                    audioFilename = it.getNullableString(7),
-                    audioAssetId = it.getNullableString(8),
-                    audioSize = it.getNullableLong(9),
-                    audioChecksum = it.getNullableString(10),
-                    audioUpdatedAt = it.getNullableString(11),
-                    audioLocalPath = it.getNullableString(12),
-                    audioCacheStatus = it.getNullableString(13) ?: "not_required",
+                    notificationId = it.getNullableString(1),
+                    audioType = it.getString(5),
+                    audioUrl = it.getNullableString(6),
+                    audioContentType = it.getNullableString(7),
+                    audioFilename = it.getNullableString(8),
+                    audioAssetId = it.getNullableString(9),
+                    audioSize = it.getNullableLong(10),
+                    audioChecksum = it.getNullableString(11),
+                    audioUpdatedAt = it.getNullableString(12),
+                    audioLocalPath = it.getNullableString(13),
+                    audioCacheStatus = it.getNullableString(14) ?: "not_required",
                 )
             }
         }
@@ -241,11 +259,20 @@ class ReminderLocalStore(context: Context) :
         if (reminderId.isNullOrBlank()) return
         val now = OffsetDateTime.now().toString()
         writableDatabase.use { db ->
+            val currentState = currentExecutionState(db, reminderId)
+            val shouldUpdateState = shouldUpdateStateColumn(currentState, state)
             val values = ContentValues().apply {
                 put("reminder_id", reminderId)
-                put("state", state)
+                if (shouldUpdateState) {
+                    put("state", state)
+                }
                 when (state) {
+                    "synced" -> put("synced_at", now)
+                    "audio_cache_pending" -> put("audio_cache_pending_at", now)
+                    "audio_cache_ready" -> put("audio_cache_ready_at", now)
+                    "audio_cache_failed" -> put("audio_cache_failed_at", now)
                     "scheduled_locally" -> put("scheduled_locally_at", now)
+                    "local_alarm_triggered" -> put("local_alarm_triggered_at", now)
                     "triggered" -> put("triggered_at", now)
                     "played" -> put("played_at", now)
                     "acknowledged" -> put("acknowledged_at", now)
@@ -262,7 +289,8 @@ class ReminderLocalStore(context: Context) :
                 null,
                 ContentValues().apply {
                     put("reminder_id", reminderId)
-                    put("state", "synced_locally")
+                    put("state", "synced")
+                    put("synced_at", now)
                     put("updated_at", now)
                 },
                 SQLiteDatabase.CONFLICT_IGNORE,
@@ -298,6 +326,7 @@ class ReminderLocalStore(context: Context) :
         val audioCache = nextAudioCacheState(db, reminder)
         val values = ContentValues().apply {
             put("id", reminder.id)
+            put("notification_id", reminder.notificationId)
             put("device_id", deviceId)
             put("title", reminder.title)
             put("message", reminder.message)
@@ -381,10 +410,12 @@ class ReminderLocalStore(context: Context) :
     }
 
     private fun insertExecutionStateIfMissing(db: SQLiteDatabase, reminderId: String) {
+        val now = OffsetDateTime.now().toString()
         val values = ContentValues().apply {
             put("reminder_id", reminderId)
-            put("state", "synced_locally")
-            put("updated_at", OffsetDateTime.now().toString())
+            put("state", "synced")
+            put("synced_at", now)
+            put("updated_at", now)
         }
         db.insertWithOnConflict(
             "reminder_execution_state",
@@ -394,18 +425,60 @@ class ReminderLocalStore(context: Context) :
         )
     }
 
+    private fun currentExecutionState(db: SQLiteDatabase, reminderId: String): String? {
+        val cursor = db.query(
+            "reminder_execution_state",
+            arrayOf("state"),
+            "reminder_id = ?",
+            arrayOf(reminderId),
+            null,
+            null,
+            null,
+            "1",
+        )
+        cursor.use {
+            return if (it.moveToFirst()) it.getNullableString(0) else null
+        }
+    }
+
+    private fun shouldUpdateStateColumn(currentState: String?, nextState: String): Boolean {
+        if (currentState in TERMINAL_STATES && nextState !in TERMINAL_STATES) {
+            return false
+        }
+        return stateRank(nextState) >= stateRank(currentState)
+    }
+
+    private fun stateRank(state: String?): Int =
+        when (state) {
+            "synced" -> 1
+            "audio_cache_pending" -> 2
+            "audio_cache_ready", "audio_cache_failed" -> 3
+            "scheduled_locally" -> 4
+            "local_alarm_triggered", "triggered" -> 5
+            "received" -> 6
+            "played" -> 7
+            "acknowledged", "failed", "expired" -> 8
+            else -> 0
+        }
+
     private fun resetExecutionState(db: SQLiteDatabase, reminderId: String) {
         val values = ContentValues().apply {
             put("reminder_id", reminderId)
-            put("state", "synced_locally")
+            put("state", "synced")
+            val now = OffsetDateTime.now().toString()
+            put("synced_at", now)
+            putNull("audio_cache_pending_at")
+            putNull("audio_cache_ready_at")
+            putNull("audio_cache_failed_at")
             putNull("scheduled_locally_at")
+            putNull("local_alarm_triggered_at")
             putNull("triggered_at")
             putNull("played_at")
             putNull("acknowledged_at")
             putNull("failed_at")
             putNull("expired_at")
             putNull("error")
-            put("updated_at", OffsetDateTime.now().toString())
+            put("updated_at", now)
         }
         db.insertWithOnConflict(
             "reminder_execution_state",
@@ -459,7 +532,7 @@ class ReminderLocalStore(context: Context) :
     private fun enabledCandidates(db: SQLiteDatabase): List<ReminderCandidate> {
         val cursor = db.rawQuery(
             """
-            SELECT d.id, d.title, d.message, d.scheduled_at,
+            SELECT d.id, d.notification_id, d.title, d.message, d.scheduled_at,
                    d.audio_type, d.audio_url, d.audio_content_type, d.audio_filename,
                    d.audio_asset_id, d.audio_size, d.audio_checksum,
                    d.audio_updated_at, d.audio_local_path, d.audio_cache_status,
@@ -474,7 +547,7 @@ class ReminderLocalStore(context: Context) :
         cursor.use {
             val candidates = mutableListOf<ReminderCandidate>()
             while (it.moveToNext()) {
-                val scheduledAt = it.getString(3)
+                val scheduledAt = it.getString(4)
                 val parsed = try {
                     OffsetDateTime.parse(scheduledAt)
                 } catch (error: Exception) {
@@ -482,24 +555,25 @@ class ReminderLocalStore(context: Context) :
                 } ?: continue
                 candidates += ReminderCandidate(
                     reminderId = it.getString(0),
-                    title = it.getString(1),
-                    message = it.getString(2),
+                    notificationId = it.getNullableString(1),
+                    title = it.getString(2),
+                    message = it.getString(3),
                     scheduledAt = scheduledAt,
-                    audioType = it.getString(4),
-                    audioUrl = it.getNullableString(5),
-                    audioContentType = it.getNullableString(6),
-                    audioFilename = it.getNullableString(7),
-                    audioAssetId = it.getNullableString(8),
-                    audioSize = it.getNullableLong(9),
-                    audioChecksum = it.getNullableString(10),
-                    audioUpdatedAt = it.getNullableString(11),
-                    audioLocalPath = it.getNullableString(12),
-                    audioCacheStatus = it.getNullableString(13) ?: "not_required",
+                    audioType = it.getString(5),
+                    audioUrl = it.getNullableString(6),
+                    audioContentType = it.getNullableString(7),
+                    audioFilename = it.getNullableString(8),
+                    audioAssetId = it.getNullableString(9),
+                    audioSize = it.getNullableLong(10),
+                    audioChecksum = it.getNullableString(11),
+                    audioUpdatedAt = it.getNullableString(12),
+                    audioLocalPath = it.getNullableString(13),
+                    audioCacheStatus = it.getNullableString(14) ?: "not_required",
                     parsed = parsed,
                     isTerminal = isTerminalForOccurrence(
-                        state = it.getString(14),
+                        state = it.getString(15),
                         scheduledAt = scheduledAt,
-                        stateUpdatedAt = it.getString(15),
+                        stateUpdatedAt = it.getString(16),
                     ),
                 )
             }
@@ -530,6 +604,7 @@ class ReminderLocalStore(context: Context) :
 
     private data class ReminderCandidate(
         val reminderId: String,
+        val notificationId: String?,
         val title: String,
         val message: String,
         val scheduledAt: String,
@@ -552,6 +627,7 @@ class ReminderLocalStore(context: Context) :
                 message = message,
                 timeText = formatReminderTime(scheduledAt),
                 reminderId = reminderId,
+                notificationId = notificationId,
                 audioType = audioType,
                 audioUrl = audioUrl,
                 audioContentType = audioContentType,
@@ -572,7 +648,8 @@ class ReminderLocalStore(context: Context) :
 
     companion object {
         private const val DATABASE_NAME = "elderptod_reminders.sqlite3"
-        private const val DATABASE_VERSION = 3
+        private const val DATABASE_VERSION = 4
+        private val TERMINAL_STATES = setOf("acknowledged", "failed", "expired")
     }
 }
 
