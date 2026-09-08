@@ -196,7 +196,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             showSetup()
         } else {
             requestReminderNotificationPermissionIfNeeded()
-            ReminderAlarmScheduler.scheduleNext(this, reminderLocalStore)
+            scheduleNextReminder()
             showIdle()
             startOnline()
             handleLaunchIntent(intent)
@@ -299,14 +299,22 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             serverTime = serverTime,
             reminders = reminders,
         )
+        reminders.forEach { reminder ->
+            reminderLocalStore.markExecutionState(reminder.id, "synced")
+            signalingClient.sendNotificationEvent(reminder.notificationId, "synced")
+        }
         reminderAudioCache.prefetch(
             reminders = reminders,
             deviceToken = deviceToken(),
             store = reminderLocalStore,
+            onStatus = { reminder, status, error ->
+                reminderLocalStore.markExecutionState(reminder.id, status, error)
+                signalingClient.sendNotificationEvent(reminder.notificationId, status, error)
+            },
         ) { audioAssetId, audioUrl ->
             reminderAudioPlaybackUrl(audioAssetId, audioUrl)
         }
-        ReminderAlarmScheduler.scheduleNext(this, reminderLocalStore)
+        scheduleNextReminder()
         if (activeCall == null && !reminderUiActive) {
             showIdle()
         }
@@ -325,7 +333,14 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             LOG_TAG,
             "notification kind=${reminder.kind} id=${reminder.notificationId} title=${reminder.title}",
         )
+        signalingClient.sendNotificationEvent(reminder.notificationId, "synced")
         handleTriggeredReminder(reminder, reportToBackend = true)
+    }
+
+    private fun scheduleNextReminder() {
+        ReminderAlarmScheduler.scheduleNext(this, reminderLocalStore) { scheduled ->
+            signalingClient.sendNotificationEvent(scheduled.notificationId, "scheduled_locally")
+        }
     }
 
     private fun handleLaunchIntent(intent: Intent?) {
@@ -340,6 +355,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
                 timeText = intent.getStringExtra(ReminderAlarmContract.EXTRA_REMINDER_TIME_TEXT)
                     ?: "現在",
                 reminderId = reminderId,
+                notificationId = intent.getStringExtra(ReminderAlarmContract.EXTRA_NOTIFICATION_ID),
                 audioType = intent.getStringExtra(ReminderAlarmContract.EXTRA_REMINDER_AUDIO_TYPE)
                     ?: "tts",
                 audioAssetId = intent.getStringExtra(
@@ -379,10 +395,13 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         ) {
             return
         }
+        reminderLocalStore.markExecutionState(reminder.reminderId, "local_alarm_triggered")
+        signalingClient.sendNotificationEvent(reminder.notificationId, "local_alarm_triggered")
         handleTriggeredReminder(reminder, reportToBackend = false)
     }
 
     internal fun showLocalAlarmReminder(reminder: ReminderState) {
+        signalingClient.sendNotificationEvent(reminder.notificationId, "local_alarm_triggered")
         handleTriggeredReminder(reminder, reportToBackend = false)
     }
 
@@ -408,7 +427,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
                 queuePriorityNotificationDuringCall(reminder, reportToBackend)
             } else {
                 reminderLocalStore.markExecutionState(reminder.reminderId, "failed", "DEVICE_BUSY")
-                ReminderAlarmScheduler.scheduleNext(this, reminderLocalStore)
+                scheduleNextReminder()
                 if (reportToBackend) {
                     signalingClient.sendNotificationEvent(
                         reminder.notificationId,
@@ -422,7 +441,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         reminderLocalStore.markExecutionState(reminder.reminderId, "triggered")
         reminderLocalStore.markExecutionState(reminder.reminderId, "received")
         if (reportToBackend) {
-            ReminderAlarmScheduler.scheduleNext(this, reminderLocalStore)
+            scheduleNextReminder()
         }
         ReminderAlarmScheduler.dismissReminderNotification(this)
         if (reportToBackend) {
@@ -488,7 +507,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         )
         pendingSpokenNotification = QueuedNotification(reminder, reportToBackend)
         reminderLocalStore.markExecutionState(reminder.reminderId, "received")
-        ReminderAlarmScheduler.scheduleNext(this, reminderLocalStore)
+        scheduleNextReminder()
         if (reportToBackend) {
             signalingClient.sendNotificationEvent(reminder.notificationId, "received")
         }
@@ -504,7 +523,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             "notification_audio_busy kind=${reminder.kind} priority=${reminder.priority} error=$error",
         )
         reminderLocalStore.markExecutionState(reminder.reminderId, "failed", error)
-        ReminderAlarmScheduler.scheduleNext(this, reminderLocalStore)
+        scheduleNextReminder()
         if (reportToBackend) {
             signalingClient.sendNotificationEvent(
                 reminder.notificationId,
@@ -1940,6 +1959,7 @@ private class ReminderAudioCache(
         reminders: List<ReminderDefinition>,
         deviceToken: String?,
         store: ReminderLocalStore,
+        onStatus: (ReminderDefinition, String, String?) -> Unit = { _, _, _ -> },
         resolveUrl: (String?, String?) -> String,
     ) {
         cacheDir.mkdirs()
@@ -1963,6 +1983,7 @@ private class ReminderAudioCache(
                         reminder.audioChecksum,
                         "ready",
                     )
+                    onStatus(reminder, "audio_cache_ready", null)
                     return@forEach
                 }
                 val requestBuilder = Request.Builder()
@@ -1977,6 +1998,7 @@ private class ReminderAudioCache(
                             reminder.audioChecksum,
                             "failed",
                         )
+                        onStatus(reminder, "audio_cache_failed", "MISSING_DEVICE_TOKEN")
                         return@forEach
                     }
                     requestBuilder.header("X-Elder-Device-Token", token)
@@ -1987,6 +2009,7 @@ private class ReminderAudioCache(
                     reminder.audioChecksum,
                     "downloading",
                 )
+                onStatus(reminder, "audio_cache_pending", null)
                 val request = requestBuilder.build()
                 client.newCall(request).enqueue(object : Callback {
                     override fun onFailure(call: Call, error: IOException) {
@@ -1996,6 +2019,7 @@ private class ReminderAudioCache(
                             reminder.audioChecksum,
                             "failed",
                         )
+                        onStatus(reminder, "audio_cache_failed", error.message)
                         Log.w(LOG_TAG, "reminder audio cache failed id=${reminder.id}", error)
                     }
 
@@ -2008,6 +2032,7 @@ private class ReminderAudioCache(
                                     reminder.audioChecksum,
                                     "failed",
                                 )
+                                onStatus(reminder, "audio_cache_failed", "HTTP_${it.code}")
                                 Log.w(
                                     LOG_TAG,
                                     "reminder audio cache http=${it.code} id=${reminder.id}",
@@ -2022,6 +2047,7 @@ private class ReminderAudioCache(
                                     reminder.audioChecksum,
                                     "failed",
                                 )
+                                onStatus(reminder, "audio_cache_failed", "EMPTY_RESPONSE")
                                 return
                             }
                             if (!checksumMatches(bytes, reminder.audioChecksum)) {
@@ -2032,6 +2058,7 @@ private class ReminderAudioCache(
                                     reminder.audioChecksum,
                                     "failed",
                                 )
+                                onStatus(reminder, "audio_cache_failed", "CHECKSUM_MISMATCH")
                                 Log.w(LOG_TAG, "reminder audio checksum mismatch id=${reminder.id}")
                                 return
                             }
@@ -2043,6 +2070,7 @@ private class ReminderAudioCache(
                                     reminder.audioChecksum,
                                     "ready",
                                 )
+                                onStatus(reminder, "audio_cache_ready", null)
                                 Log.i(LOG_TAG, "reminder audio cached id=${reminder.id}")
                             } catch (error: IOException) {
                                 store.updateAudioCacheState(
@@ -2051,6 +2079,7 @@ private class ReminderAudioCache(
                                     reminder.audioChecksum,
                                     "failed",
                                 )
+                                onStatus(reminder, "audio_cache_failed", error.message)
                                 Log.w(
                                     LOG_TAG,
                                     "reminder audio cache write failed id=${reminder.id}",
@@ -3187,6 +3216,7 @@ private fun parseReminderDefinitions(array: JSONArray?): List<ReminderDefinition
         }
         reminders += ReminderDefinition(
             id = id,
+            notificationId = item.optNullableString("notification_id"),
             title = title,
             message = message,
             scheduledAt = scheduledAt,

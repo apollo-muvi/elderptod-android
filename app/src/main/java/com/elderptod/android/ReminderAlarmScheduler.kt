@@ -25,6 +25,7 @@ object ReminderAlarmContract {
     const val ACTION_ALARM = "com.elderptod.android.action.REMINDER_ALARM"
     const val ACTION_SHOW = "com.elderptod.android.action.SHOW_REMINDER"
     const val EXTRA_REMINDER_ID = "reminder_id"
+    const val EXTRA_NOTIFICATION_ID = "notification_id"
     const val EXTRA_REMINDER_TITLE = "reminder_title"
     const val EXTRA_REMINDER_MESSAGE = "reminder_message"
     const val EXTRA_REMINDER_TIME_TEXT = "reminder_time_text"
@@ -81,7 +82,11 @@ object ReminderAlarmScheduler {
         }
     }
 
-    fun scheduleNext(context: Context, store: ReminderLocalStore) {
+    fun scheduleNext(
+        context: Context,
+        store: ReminderLocalStore,
+        onScheduled: (ReminderAlarmItem) -> Unit = {},
+    ) {
         val appContext = context.applicationContext
         val alarmManager = appContext.getSystemService(AlarmManager::class.java)
         val pendingIntent = alarmPendingIntent(appContext)
@@ -122,10 +127,12 @@ object ReminderAlarmScheduler {
                 )
             }
             store.markExecutionState(next.reminderId, "scheduled_locally")
+            onScheduled(next)
             Log.i(LOG_TAG, "scheduled local reminder id=${next.reminderId} at=${next.scheduledAt}")
         } catch (error: SecurityException) {
             alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMs, pendingIntent)
             store.markExecutionState(next.reminderId, "scheduled_locally")
+            onScheduled(next)
             Log.w(LOG_TAG, "scheduled inexact local reminder id=${next.reminderId}", error)
         }
     }
@@ -197,6 +204,7 @@ object ReminderAlarmScheduler {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
             putExtra(ReminderAlarmContract.EXTRA_REMINDER_ID, reminder.reminderId)
+            putExtra(ReminderAlarmContract.EXTRA_NOTIFICATION_ID, reminder.notificationId)
             putExtra(ReminderAlarmContract.EXTRA_REMINDER_TITLE, reminder.title)
             putExtra(ReminderAlarmContract.EXTRA_REMINDER_MESSAGE, reminder.message)
             putExtra(ReminderAlarmContract.EXTRA_REMINDER_TIME_TEXT, reminder.timeText)
@@ -244,7 +252,7 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
         ReminderLocalStore(appContext).use { store ->
             val reminder = store.dueAlarmReminder() ?: return
             Log.i(LOG_TAG, "local reminder alarm id=${reminder.reminderId}")
-            store.markExecutionState(reminder.reminderId, "triggered")
+            store.markExecutionState(reminder.reminderId, "local_alarm_triggered")
             ReminderAlarmScheduler.scheduleNext(appContext, store)
             if (!ReminderForegroundHost.showReminder(reminder)) {
                 ReminderAlarmScheduler.showReminderNotification(appContext, reminder)
