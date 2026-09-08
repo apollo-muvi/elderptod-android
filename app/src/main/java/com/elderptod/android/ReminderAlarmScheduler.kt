@@ -86,16 +86,16 @@ object ReminderAlarmScheduler {
         context: Context,
         store: ReminderLocalStore,
         onScheduled: (ReminderAlarmItem) -> Unit = {},
-    ) {
+    ): ReminderAlarmItem? {
         val appContext = context.applicationContext
         val alarmManager = appContext.getSystemService(AlarmManager::class.java)
         val pendingIntent = alarmPendingIntent(appContext)
         alarmManager.cancel(pendingIntent)
 
-        val next = store.nextAlarmReminder() ?: return
+        val next = store.nextAlarmReminder() ?: return null
         val triggerAtMs = next.scheduledAt.toInstant().toEpochMilli()
         val nowMs = System.currentTimeMillis()
-        if (triggerAtMs <= nowMs) return
+        if (triggerAtMs <= nowMs) return null
 
         try {
             val reminder = store.reminderById(next.reminderId)
@@ -129,11 +129,13 @@ object ReminderAlarmScheduler {
             store.markExecutionState(next.reminderId, "scheduled_locally")
             onScheduled(next)
             Log.i(LOG_TAG, "scheduled local reminder id=${next.reminderId} at=${next.scheduledAt}")
+            return next
         } catch (error: SecurityException) {
             alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMs, pendingIntent)
             store.markExecutionState(next.reminderId, "scheduled_locally")
             onScheduled(next)
             Log.w(LOG_TAG, "scheduled inexact local reminder id=${next.reminderId}", error)
+            return next
         }
     }
 
