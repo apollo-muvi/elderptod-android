@@ -2,6 +2,7 @@ package com.elderptod.android
 
 import android.Manifest
 import android.app.AlarmManager
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -18,6 +19,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.text.InputType
@@ -233,6 +235,9 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     override fun onResume() {
         super.onResume()
         signalingClient.sendDeviceStatus(exactAlarmStatusValue())
+        if (!deviceToken().isNullOrBlank() && activeCall == null && !reminderUiActive) {
+            showIdle()
+        }
     }
 
     override fun onStop() {
@@ -950,10 +955,20 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         ).apply {
             setOnClickListener { startOnline() }
         }
+        val exactAlarmSettingsAction = ui.homeActionCard(
+            title = "鬧鐘權限",
+            subtitle = "請家人協助開啟",
+            primary = false,
+        ).apply {
+            setOnClickListener { openExactAlarmSettings() }
+        }
         hideActions()
         showSpeakerSwitch()
         homeActions.addView(playAction, ui.homeActionParams(first = true))
         homeActions.addView(reconnectAction, ui.homeActionParams(first = false))
+        if (exactAlarmWarning.isNotBlank()) {
+            homeActions.addView(exactAlarmSettingsAction, ui.homeActionParams(first = false))
+        }
         homeActions.visibility = View.VISIBLE
         showFontSizeSelector()
         scheduleClockRefresh()
@@ -1570,6 +1585,24 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
             "提醒鬧鐘權限關閉，螢幕關閉時提醒可能延遲。請家人協助開啟。"
         } else {
             ""
+        }
+    }
+
+    private fun openExactAlarmSettings() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        val packageUri = Uri.parse("package:$packageName")
+        try {
+            startActivity(
+                Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+                    data = packageUri
+                },
+            )
+        } catch (error: ActivityNotFoundException) {
+            startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = packageUri
+                },
+            )
         }
     }
 
