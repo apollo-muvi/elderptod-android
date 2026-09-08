@@ -101,7 +101,9 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private val prefs by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
     private val backendClient by lazy { BackendClient(httpClient, mainHandler) }
     private val audioController by lazy { CallAudioController(this) }
-    private val signalingClient by lazy { SignalingClient(httpClient, mainHandler, this) }
+    private val signalingClient by lazy {
+        SignalingClient(httpClient, mainHandler, this) { exactAlarmStatusValue() }
+    }
     private val reminderLocalStore by lazy { ReminderLocalStore(this) }
     private val reminderTts by lazy { ReminderTtsManager(this, mainHandler) }
     private val reminderAudioPlayer by lazy { ReminderAudioPlayer(this, mainHandler) }
@@ -226,6 +228,11 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     override fun onStart() {
         super.onStart()
         ReminderForegroundHost.attach(this)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        signalingClient.sendDeviceStatus(exactAlarmStatusValue())
     }
 
     override fun onStop() {
@@ -1553,13 +1560,17 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     }
 
     private fun exactAlarmWarningText(): String {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return ""
-        val alarmManager = getSystemService(AlarmManager::class.java)
-        return if (alarmManager.canScheduleExactAlarms()) {
-            ""
-        } else {
+        return if (exactAlarmStatusValue() == "denied") {
             "提醒鬧鐘權限關閉，螢幕關閉時提醒可能延遲。請家人協助開啟。"
+        } else {
+            ""
         }
+    }
+
+    private fun exactAlarmStatusValue(): String {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return "not_required"
+        val alarmManager = getSystemService(AlarmManager::class.java)
+        return if (alarmManager.canScheduleExactAlarms()) "allowed" else "denied"
     }
 
     private fun deviceToken(): String? = prefs.getString(KEY_DEVICE_TOKEN, null)
@@ -2263,6 +2274,7 @@ private class SignalingClient(
     private val client: OkHttpClient,
     private val mainHandler: Handler,
     private val listener: SignalingListener,
+    private val exactAlarmStatus: () -> String,
 ) : WebSocketListener() {
     private var socket: WebSocket? = null
     private var baseUrl: String = ""
@@ -2322,6 +2334,15 @@ private class SignalingClient(
         socket?.send(JSONObject().put("type", "media_ready").put("call_id", callId).toString())
     }
 
+    fun sendDeviceStatus(exactAlarmStatus: String) {
+        socket?.send(
+            JSONObject()
+                .put("type", "device_status")
+                .put("exact_alarm_status", exactAlarmStatus)
+                .toString(),
+        )
+    }
+
     fun sendNotificationEvent(notificationId: String?, status: String, error: String? = null) {
         if (notificationId.isNullOrBlank()) return
         val payload = JSONObject()
@@ -2347,7 +2368,8 @@ private class SignalingClient(
                         .put("platform", "android_native")
                         .put("app_version", BuildConfig.VERSION_NAME)
                         .put("android_sdk", Build.VERSION.SDK_INT)
-                        .put("device_model", "${Build.MANUFACTURER} ${Build.MODEL}"),
+                        .put("device_model", "${Build.MANUFACTURER} ${Build.MODEL}")
+                        .put("exact_alarm_status", exactAlarmStatus())
                 )
                 .toString(),
         )
