@@ -393,6 +393,16 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
                 } else {
                     null
                 },
+                audioDurationMs = if (
+                    intent.hasExtra(ReminderAlarmContract.EXTRA_REMINDER_AUDIO_DURATION_MS)
+                ) {
+                    intent.getLongExtra(
+                        ReminderAlarmContract.EXTRA_REMINDER_AUDIO_DURATION_MS,
+                        0L,
+                    )
+                } else {
+                    null
+                },
                 audioChecksum = intent.getStringExtra(
                     ReminderAlarmContract.EXTRA_REMINDER_AUDIO_CHECKSUM,
                 ),
@@ -1733,6 +1743,7 @@ data class ReminderState(
     val audioContentType: String? = null,
     val audioFilename: String? = null,
     val audioSize: Long? = null,
+    val audioDurationMs: Long? = null,
     val audioChecksum: String? = null,
     val audioUpdatedAt: String? = null,
     val audioLocalPath: String? = null,
@@ -2509,6 +2520,7 @@ private class SignalingClient(
                         audioContentType = notification.optNullableString("audio_content_type"),
                         audioFilename = notification.optNullableString("audio_filename"),
                         audioSize = notification.optNullableLong("audio_size"),
+                        audioDurationMs = notification.optNullableLong("audio_duration_ms"),
                         audioChecksum = notification.optNullableString("audio_checksum"),
                         audioUpdatedAt = notification.optNullableString("audio_updated_at"),
                     ),
@@ -3267,6 +3279,7 @@ private fun parseReminderState(reminder: JSONObject?): ReminderState? {
         audioContentType = reminder.optNullableString("audio_content_type"),
         audioFilename = reminder.optNullableString("audio_filename"),
         audioSize = reminder.optNullableLong("audio_size"),
+        audioDurationMs = reminder.optNullableLong("audio_duration_ms"),
         audioChecksum = reminder.optNullableString("audio_checksum"),
         audioUpdatedAt = reminder.optNullableString("audio_updated_at"),
     )
@@ -3306,6 +3319,7 @@ private fun parseReminderDefinitions(array: JSONArray?): List<ReminderDefinition
             audioContentType = item.optNullableString("audio_content_type"),
             audioFilename = item.optNullableString("audio_filename"),
             audioSize = item.optNullableLong("audio_size"),
+            audioDurationMs = item.optNullableLong("audio_duration_ms"),
             audioChecksum = item.optNullableString("audio_checksum"),
             audioUpdatedAt = item.optNullableString("audio_updated_at"),
         )
