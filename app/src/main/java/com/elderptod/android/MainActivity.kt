@@ -321,7 +321,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         ) { audioAssetId, audioUrl ->
             reminderAudioPlaybackUrl(audioAssetId, audioUrl)
         }
-        scheduleNextReminder()
+        scheduleNextReminder(serverTime ?: OffsetDateTime.now().toString())
         if (activeCall == null && !reminderUiActive) {
             showIdle()
         }
@@ -344,10 +344,16 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         handleTriggeredReminder(reminder, reportToBackend = true)
     }
 
-    private fun scheduleNextReminder() {
-        ReminderAlarmScheduler.scheduleNext(this, reminderLocalStore) { scheduled ->
+    private fun scheduleNextReminder(lastReminderSyncAt: String? = null) {
+        val scheduled = ReminderAlarmScheduler.scheduleNext(this, reminderLocalStore) { scheduled ->
             signalingClient.sendNotificationEvent(scheduled.notificationId, "scheduled_locally")
         }
+        signalingClient.sendDeviceStatus(
+            exactAlarmStatus = exactAlarmStatusValue(),
+            lastReminderSyncAt = lastReminderSyncAt,
+            localReminder = scheduled,
+            includeLocalReminder = true,
+        )
     }
 
     private fun handleLaunchIntent(intent: Intent?) {
@@ -2334,13 +2340,29 @@ private class SignalingClient(
         socket?.send(JSONObject().put("type", "media_ready").put("call_id", callId).toString())
     }
 
-    fun sendDeviceStatus(exactAlarmStatus: String) {
-        socket?.send(
-            JSONObject()
-                .put("type", "device_status")
-                .put("exact_alarm_status", exactAlarmStatus)
-                .toString(),
-        )
+    fun sendDeviceStatus(
+        exactAlarmStatus: String,
+        lastReminderSyncAt: String? = null,
+        localReminder: ReminderAlarmItem? = null,
+        includeLocalReminder: Boolean = false,
+    ) {
+        val payload = JSONObject()
+            .put("type", "device_status")
+            .put("exact_alarm_status", exactAlarmStatus)
+        if (lastReminderSyncAt != null) {
+            payload.put("last_reminder_sync_at", lastReminderSyncAt)
+        }
+        if (includeLocalReminder) {
+            payload.put(
+                "next_local_reminder_id",
+                localReminder?.reminderId ?: JSONObject.NULL,
+            )
+            payload.put(
+                "next_local_reminder_at",
+                localReminder?.scheduledAt?.toString() ?: JSONObject.NULL,
+            )
+        }
+        socket?.send(payload.toString())
     }
 
     fun sendNotificationEvent(notificationId: String?, status: String, error: String? = null) {
