@@ -2,6 +2,7 @@
 /build/
 /app/build/
 local.properties
+app/google-services.json
 *.iml
 .idea/
 .DS_Store
