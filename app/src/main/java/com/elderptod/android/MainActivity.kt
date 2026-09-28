@@ -36,6 +36,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
@@ -84,6 +85,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.max
 
 private const val PREFS = "elderptod"
+private const val KEY_DEVICE_ID = "device_id"
 private const val KEY_DEVICE_TOKEN = "device_token"
 private const val KEY_BASE_URL = "base_url"
 private const val KEY_TENANT_KEY = "tenant_key"
@@ -162,6 +164,8 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     private lateinit var dangerButton: Button
     private lateinit var speakerRow: LinearLayout
     private lateinit var speakerSwitch: Switch
+    private lateinit var notificationRow: LinearLayout
+    private lateinit var notificationSwitch: Switch
     private var baseUrlInput: EditText? = null
     private var pairingCodeInput: EditText? = null
     private var pendingTenantKey: String? = null
@@ -199,6 +203,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         if (deviceToken().isNullOrBlank()) {
             showSetup()
         } else {
+            FcmRegistration.syncCurrentToken(this)
             requestReminderNotificationPermissionIfNeeded()
             scheduleNextReminder()
             showIdle()
@@ -258,11 +263,16 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
     }
 
     override fun onHelloAck(
+        deviceId: String,
         deviceName: String,
         settings: JSONObject?,
         next: JSONObject?,
         tasks: List<TaskState>,
     ) {
+        if (deviceId.isNotBlank()) {
+            prefs.edit().putString(KEY_DEVICE_ID, deviceId).apply()
+            FcmRegistration.syncCurrentToken(this)
+        }
         Log.i(LOG_TAG, "hello_ack deviceName=$deviceName")
         remotePlaybackGainProfile = remoteAudioGainProfile(settings)
         webrtc.setRemoteAudioGain(remoteAudioGain(settings))
@@ -653,7 +663,11 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         }
         if (code == "AUTH_FAILED") {
             ReminderAlarmScheduler.cancel(this)
-            prefs.edit().remove(KEY_DEVICE_TOKEN).remove(KEY_TENANT_KEY).apply()
+            prefs.edit()
+                .remove(KEY_DEVICE_ID)
+                .remove(KEY_DEVICE_TOKEN)
+                .remove(KEY_TENANT_KEY)
+                .apply()
             showSetup(status.text.toString())
         }
     }
@@ -698,6 +712,12 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         )
         speakerRow = switchControl.row
         speakerSwitch = switchControl.switch
+        val notificationControl = ui.engineeringSwitchRow(
+            label = "推播通知",
+            contentDescription = "推播通知",
+        )
+        notificationRow = notificationControl.row
+        notificationSwitch = notificationControl.switch
 
         root.addView(topBar, ui.matchWrap())
         root.addView(title, ui.matchWrap())
@@ -705,6 +725,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         root.addView(status, ui.matchWrap())
         root.addView(contentScroll, ui.expandedContent())
         root.addView(speakerRow, ui.matchWrap())
+        root.addView(notificationRow, ui.matchWrap())
         root.addView(homeActions, ui.matchWrap())
         root.addView(fontSizeRow, ui.matchWrap())
         root.addView(primaryButton, ui.matchWrap())
@@ -783,6 +804,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         tertiaryButton.visibility = View.GONE
         dangerButton.visibility = View.GONE
         speakerRow.visibility = View.GONE
+        notificationRow.visibility = View.GONE
         fontSizeRow.visibility = View.GONE
         fontSizeRow.removeAllViews()
     }
@@ -974,6 +996,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         }
         hideActions()
         showSpeakerSwitch()
+        showNotificationSwitch()
         homeActions.addView(playAction, ui.homeActionParams(first = true))
         homeActions.addView(reconnectAction, ui.homeActionParams(first = false))
         if (exactAlarmWarning.isNotBlank()) {
@@ -1395,13 +1418,15 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         val tenantKey = pendingTenantKey?.trim().orEmpty()
         backendClient.pairDevice(baseUrl, pairingCode, tenantKey, "用戶裝置") { result ->
             primaryButton.isEnabled = true
-            result.onSuccess { token ->
+            result.onSuccess { pairedDevice ->
                 prefs.edit()
                     .putString(KEY_BASE_URL, baseUrl)
-                    .putString(KEY_DEVICE_TOKEN, token)
+                    .putString(KEY_DEVICE_ID, pairedDevice.id)
+                    .putString(KEY_DEVICE_TOKEN, pairedDevice.token)
                     .putString(KEY_TENANT_KEY, tenantKey)
                     .apply()
                 pendingTenantKey = null
+                FcmRegistration.syncCurrentToken(this)
                 requestReminderNotificationPermissionIfNeeded()
                 showReadyToStart(autoStart = true)
             }.onFailure { error ->
@@ -1454,6 +1479,7 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         if (baseUrl.isBlank() || isAndroidLoopbackUrl(baseUrl)) {
             prefs.edit()
                 .remove(KEY_BASE_URL)
+                .remove(KEY_DEVICE_ID)
                 .remove(KEY_DEVICE_TOKEN)
                 .remove(KEY_TENANT_KEY)
                 .apply()
@@ -1664,6 +1690,26 @@ class MainActivity : ComponentActivity(), SignalingListener, WebRtcEvents {
         speakerRow.visibility = View.VISIBLE
     }
 
+    private fun showNotificationSwitch() {
+        notificationSwitch.setOnCheckedChangeListener(null)
+        notificationSwitch.isChecked = FcmRegistration.notificationsEnabled(this)
+        notificationSwitch.setOnCheckedChangeListener { _, enabled ->
+            FcmRegistration.setNotificationsEnabled(this, enabled)
+            if (enabled) {
+                requestReminderNotificationPermissionIfNeeded()
+                showBodyStatus("推播通知已開啟")
+                Toast.makeText(this, "推播通知已開啟", Toast.LENGTH_SHORT).show()
+            } else {
+                showBodyStatus("推播通知已關閉")
+                Toast.makeText(this, "推播通知已關閉", Toast.LENGTH_SHORT).show()
+            }
+        }
+        notificationRow.setOnClickListener {
+            notificationSwitch.isChecked = !notificationSwitch.isChecked
+        }
+        notificationRow.visibility = View.VISIBLE
+    }
+
     private fun setSpeakerMode(enabled: Boolean) {
         if (enabled == forceMediaSpeaker()) return
         prefs.edit().putBoolean(KEY_FORCE_MEDIA_SPEAKER, enabled).apply()
@@ -1776,8 +1822,14 @@ data class CallState(
     val status: String,
 )
 
+data class PairedDevice(
+    val id: String,
+    val token: String,
+)
+
 interface SignalingListener {
     fun onHelloAck(
+        deviceId: String,
         deviceName: String,
         settings: JSONObject?,
         next: JSONObject?,
@@ -2233,7 +2285,7 @@ private class BackendClient(
         pairingCode: String,
         tenantKey: String,
         deviceName: String,
-        callback: (Result<String>) -> Unit,
+        callback: (Result<PairedDevice>) -> Unit,
     ) {
         val payload = JSONObject()
             .put("pairing_code", pairingCode)
@@ -2259,13 +2311,14 @@ private class BackendClient(
                         }
                         return
                     }
-                    val token = JSONObject(response.body?.string().orEmpty())
-                        .optString("device_token")
+                    val responseBody = JSONObject(response.body?.string().orEmpty())
+                    val deviceId = responseBody.optString("device_id")
+                    val token = responseBody.optString("device_token")
                     mainHandler.post {
-                        if (token.isBlank()) {
+                        if (deviceId.isBlank() || token.isBlank()) {
                             callback(Result.failure(IOException("BAD_PAIRING_RESPONSE")))
                         } else {
-                            callback(Result.success(token))
+                            callback(Result.success(PairedDevice(deviceId, token)))
                         }
                     }
                 }
@@ -2468,6 +2521,7 @@ private class SignalingClient(
     private fun handleMessage(message: JSONObject) {
         when (message.optString("type")) {
             "hello_ack" -> listener.onHelloAck(
+                message.optString("device_id"),
                 message.optString("device_name"),
                 message.optJSONObject("settings"),
                 message.optJSONObject("next_reminder"),
